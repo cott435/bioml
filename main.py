@@ -1,11 +1,10 @@
 import pandas as pd
 import numpy as np
-from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import seaborn as sns
 from data_parse import get_geoparse
-import statsmodels.api as sm
-from statsmodels.stats.multitest import multipletests
+from models import fit_timecourse_ols
+from scipy.stats import linregress
 
 expression_df, phenotype_df = get_geoparse()
 phenotype_df["hours"] = (
@@ -17,53 +16,6 @@ phenotype_df["ctrl"] = phenotype_df["title"].str.contains(
     "negative control", case=False, na=False
 )
 phenotype_df = phenotype_df[['hours', 'ctrl']]
-
-# View raw data as is (already log transformed)
-expression_df.hist(bins=100)
-expression_df.boxplot()
-
-# Ensure same sample order
-samples = phenotype_df.index
-X = expression_df.T
-assert all(X.index == phenotype_df.index)
-
-pca = PCA(n_components=5)
-X_pca = pca.fit_transform(X)
-
-pca_df = pd.DataFrame(
-    X_pca,
-    index=X.index,
-    columns=[f"PC{i+1}" for i in range(X_pca.shape[1])]
-)
-
-pca_df = pca_df.join(phenotype_df)
-pca_df['hours_cat'] = pca_df['hours'].astype(str)
-
-plt.figure(figsize=(6, 5))
-sns.scatterplot(
-    data=pca_df,
-    x="PC1",
-    y="PC2",
-    hue="hours_cat",
-    palette="viridis",
-    s=80
-)
-plt.title("PCA of samples (colored by time)")
-plt.tight_layout()
-plt.show()
-
-plt.figure(figsize=(6, 5))
-sns.scatterplot(
-    data=pca_df,
-    x="PC1",
-    y="PC2",
-    hue="ctrl",
-    style="ctrl",
-    s=80
-)
-plt.title("PCA of samples (colored by treatment)")
-plt.tight_layout()
-plt.show()
 
 
 # minimal filtering
@@ -77,136 +29,16 @@ var_filter = exp_filter.var(axis=1) > MIN_VAR
 exp_filter = exp_filter.loc[var_filter]
 print(f"Genes after variance filter: {exp_filter.shape[0]}")
 
-
-plt.hist(expression_df.values.flatten(), bins=100, alpha=0.5, label="All genes")
-plt.hist(exp_filter.values.flatten(), bins=100, alpha=0.5, label="Filtered")
-plt.legend()
-plt.title("Expression distributions")
-plt.show()
-
-
-def fit_timecourse_ols(
-    expr_gene_by_sample: pd.DataFrame,
-    pheno: pd.DataFrame,
-    time_col: str = "time",
-    type_col: str = "type",
-    control_label: str = "negative_control",
-    center_time: bool = True,
-    add_timepoint_effects: bool = True,
-) -> pd.DataFrame:
-    """
-    Per-gene OLS model:
-        y ~ 1 + time + treat + time:treat
-
-    expr_gene_by_sample: rows=genes, cols=samples (log2 expression)
-    pheno: index=samples, columns include time_col (numeric hours) and type_col (control vs treated)
-
-    Returns a results DataFrame indexed by gene with betas, pvals, and FDRs.
-    """
-    # --- Align samples ---
-    samples = pheno.index
-    if not set(samples).issubset(expr_gene_by_sample.columns):
-        missing = set(samples) - set(expr_gene_by_sample.columns)
-        raise ValueError(f"Samples in pheno missing from expr columns: {sorted(list(missing))[:10]} ...")
-    expr = expr_gene_by_sample.loc[:, samples]
-
-    # --- Build design matrix ---
-    time = pd.to_numeric(pheno[time_col], errors="raise").astype(float).to_numpy()
-
-    # treatment indicator: 0=control, 1=treated (anything not equal to control_label is treated)
-    treat = ~pheno[type_col].to_numpy().astype(int)+2
-
-    if center_time:
-        time_c = time - np.mean(time)
-    else:
-        time_c = time.copy()
-
-    X = np.column_stack([
-        np.ones_like(time_c),          # intercept
-        time_c,                        # time
-        treat,                         # treatment main effect
-        time_c * treat,                # interaction
-    ])
-    X_cols = ["Intercept", "time_c", "treat", "time_c:treat"]
-
-    # Precompute for speed
-    XtX_inv = np.linalg.inv(X.T @ X)
-    H = XtX_inv @ X.T  # (p x n)
-
-    # --- Fit per gene ---
-    Y = expr.to_numpy(dtype=float)          # (G x N)
-    G, N = Y.shape
-    P = X.shape[1]
-
-    betas = (H @ Y.T).T                     # (G x P)
-    resid = Y - (betas @ X.T)               # (G x N)
-
-    dof = N - P
-    sigma2 = (resid**2).sum(axis=1) / dof   # (G,)
-    se = np.sqrt(sigma2[:, None] * np.diag(XtX_inv)[None, :])  # (G x P)
-
-    # t-stats and 2-sided p-values (use statsmodels' survival function for numerical stability)
-    # statsmodels uses scipy under the hood; if unavailable, fall back to normal approx.
-    try:
-        from scipy import stats
-        tvals = betas / se
-        pvals = 2.0 * stats.t.sf(np.abs(tvals), df=dof)
-    except Exception:
-        # Normal approximation fallback
-        from math import erf, sqrt
-        tvals = betas / se
-        # p = 2*(1-Phi(|t|))
-        pvals = 2.0 * (1.0 - 0.5 * (1.0 + np.vectorize(lambda z: erf(z / sqrt(2.0)))(np.abs(tvals))))
-
-    res = pd.DataFrame(
-        betas,
-        index=expr.index,
-        columns=[f"beta_{c}" for c in X_cols],
-    )
-    for j, c in enumerate(X_cols):
-        res[f"se_{c}"] = se[:, j]
-        res[f"t_{c}"] = tvals[:, j]
-        res[f"p_{c}"] = pvals[:, j]
-
-    # Multiple-testing correction on the key hypothesis tests
-    # - treat main effect: overall shift between treated vs control at mean time (if centered)
-    # - interaction: difference in slope over time
-    res["fdr_treat"] = multipletests(res["p_treat"].to_numpy(), method="fdr_bh")[1]
-    res["fdr_interaction"] = multipletests(res["p_time_c:treat"].to_numpy(), method="fdr_bh")[1]
-
-    # Optional: compute treated-vs-control effect at each observed timepoint
-    # If centered: effect(t) = beta_treat + beta_int * (t - mean_t)
-    if add_timepoint_effects:
-        unique_times = np.sort(np.unique(time))
-        mean_t = np.mean(time) if center_time else 0.0
-        b_treat = res["beta_treat"].to_numpy()
-        b_int = res["beta_time_c:treat"].to_numpy()
-
-        for t in unique_times:
-            tc = (t - mean_t) if center_time else t
-            res[f"effect_treat_at_{t:g}h"] = b_treat + b_int * tc
-
-    return res
-
-
-# -----------------------
-# Example usage
-# -----------------------
-# expr_filt: genes x samples (already minimally filtered)
-# pheno_df: samples x metadata, with columns e.g.:
-#   pheno_df["time_hours"] (numeric)
-#   pheno_df["type"] (e.g., "negative_control" vs "miR-124")
-#
 results = fit_timecourse_ols(
      expr_gene_by_sample=exp_filter,
      pheno=phenotype_df,
      time_col="hours",
      type_col="ctrl",
-     control_label="negative_control",
      center_time=True,
      add_timepoint_effects=True,
  )
-#
+
+
 res = results.copy()
 res["abs_beta_treat"] = res["beta_treat"].abs()
 res["abs_beta_interaction"] = res["beta_time_c:treat"].abs()
@@ -273,4 +105,82 @@ hits_time = res[
 
 early = hits_main[hits_main["effect_treat_at_4h"] < -0.3]
 late = hits_main[hits_main["effect_treat_at_16h"] < -0.3]
+
+top_n = 200
+candidates = res.nsmallest(top_n, ['fdr_interaction', 'fdr_treat']).index
+
+# Z-score expression per gene
+expr_z = exp_filter.loc[candidates].T
+expr_z = (expr_z - expr_z.mean()) / expr_z.std()
+
+# Order samples by time, then treatment
+sample_order = phenotype_df.sort_values(['ctrl', 'hours']).index
+expr_z = expr_z.loc[sample_order]
+
+plt.figure(figsize=(10, 12))
+sns.heatmap(expr_z, cmap='RdBu_r', center=0, xticklabels=False, cbar_kws={'label': 'Z-score'})
+plt.title(f'Top {top_n} Treatment-Responsive Genes (Z-scored expression)')
+plt.ylabel('Genes (ordered by FDR)')
+plt.xlabel('Samples (ordered by time then treatment)')
+plt.show()
+
+
+hits = res[(res['fdr_treat'] < 0.05) | (res['fdr_interaction'] < 0.05)].copy()
+main_only = res[(res['fdr_treat'] < 0.05) & (res['fdr_interaction'] >= 0.05)]
+interaction_only = res[(res['fdr_interaction'] < 0.05) & (res['fdr_treat'] >= 0.05)]
+both = res[(res['fdr_treat'] < 0.05) & (res['fdr_interaction'] < 0.05)]
+
+
+
+samples = phenotype_df[~phenotype_df['ctrl']].index
+time = phenotype_df[~phenotype_df['ctrl']]['hours']
+interaction_genes = interaction_only.index
+popts=[]
+t_norm = time / (time.max() - time.min() + 1e-8)
+
+for gene, y in exp_filter.loc[interaction_genes, samples].iterrows():
+    # Design matrix: [1, t, t²]
+    X = np.column_stack([np.ones_like(t_norm), t_norm, t_norm ** 2])
+
+    # Fit quadratic model using ordinary least squares
+    coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    a, b, c = coeffs  # y ≈ a + b*t + c*t²
+
+    # Check if quadratic term is significant
+    # Simple way: compare R² of linear vs quadratic
+    # Linear fit
+    slope, intercept, r_linear, _, _ = linregress(t_norm, y)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    ss_res_linear = np.sum((y - (slope * t_norm + intercept)) ** 2)
+    r2_linear = 1 - ss_res_linear / ss_tot
+
+    # Quadratic residuals
+    y_pred_quad = X @ coeffs
+    ss_res_quad = np.sum((y - y_pred_quad) ** 2)
+    r2_quad = 1 - ss_res_quad / ss_tot
+    improvement = r2_quad - r2_linear
+    plt.plot(y)
+
+    if c < 0 and improvement > 0.05:  # significant improvement and concave
+        group = "early_response"
+    # If quadratic term is large and positive → convex
+    elif c > 0 and improvement > 0.05:
+        group = "late_response"
+    # If quadratic doesn't improve much → linear is sufficient
+    elif improvement < 0.03:
+        group = "sustained_linear"
+    else:
+        group = "no_clear_pattern"
+
+    improvement = r2_quad - r2_linear
+    popts.append({
+        'gene': gene,
+        'group': group,
+        'y': y
+    })
+
+for i in range(15):
+    plt.figure()
+    plt.plot(popts[i]['y'])
+    plt.title(popts[i]['group'])
 
