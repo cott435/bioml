@@ -77,14 +77,15 @@ def collate_pretrained(batch, tokenizer, max_length=512):
 # --------------------- Trainer Class (Works for Both) ---------------------
 class Trainer:
     def __init__(self, model, train_loader, val_loader, device='cuda' if torch.cuda.is_available() else 'cpu',
-                 lr=1e-4, epochs=5, use_pretrained=False):
+                 lr=1e-4, epochs=5, use_pretrained=False, loss_weight=None):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
         self.epochs = epochs
         self.optimizer = AdamW(self.model.parameters(), lr=lr) if use_pretrained else Adam(self.model.parameters(), lr=lr)
-        self.loss_fn = nn.BCEWithLogitsLoss(ignore_index=-100)  # Ignores padded labels
+        loss_weight = torch.tensor(loss_weight) if loss_weight is not None else None
+        self.loss_fn = nn.BCEWithLogitsLoss(weight=loss_weight)  # Ignores padded labels
 
     def train_epoch(self):
         self.model.train()
