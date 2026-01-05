@@ -3,3 +3,6 @@
 *.xlsx
 *.pkl
 *.gz
+.ipynb_checkpoints/
+*.pyc
+.idea/
