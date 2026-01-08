@@ -1,12 +1,12 @@
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 import torch
-from data import EpitopeDataset, alphabet_batch_convert
+from data import EpitopeDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import roc_auc_score, precision_recall_fscore_support
 import numpy as np
 from torch.utils.data import DataLoader
-from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.model_selection import GroupKFold
 
 class Trainer:
     """Handles training, validation, and logging for one run (single split or fold)."""
@@ -63,34 +63,23 @@ class Trainer:
         self.model.load_state_dict(self.best_state)  # Load best
 
 
-def run_cross_validation(model, batch_converter, sequences, labels, n_splits=5, device='cpu'):
-
-    def collate_fn(batch):
-        esm2_batch_labels, esm2_batch_strs, esm2_batch_tokens = batch_converter([b[0] for b in batch])
-        labels = torch.zeros_like(esm2_batch_tokens)
-        start = int(batch_converter.alphabet.prepend_bos)
-        for i, l in enumerate([b[1] for b in batch]):
-            labels[i, start:len(l) + start] = torch.tensor(l)
-        return esm2_batch_tokens, labels
+def run_cross_validation(model, tokenizer, data, n_splits=5, device='cpu'):
 
     """Separate function for full CV – this is the clean place for it."""
-    skf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-    stratify_labels = [len(l)/len(s) for s, l in zip(sequences, labels)]
+    skf = GroupKFold(n_splits=n_splits)
     fold_results = []
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(sequences)):
+    for fold, (train_idx, val_idx) in enumerate(skf.split(data, groups=data['cluster_id'])):
         print(f"\n=== Fold {fold+1}/{n_splits} ===")
-        train_seq = [sequences[i] for i in train_idx]
-        val_seq = [sequences[i] for i in val_idx]
-        train_lab = [labels[i] for i in train_idx]
-        val_lab = [labels[i] for i in val_idx]
-        loss_weight = np.array([(len(l) - sum(l))/sum(l) for l in train_lab]).mean().item()
+        train_data = data.iloc[train_idx]
+        val_data = data.iloc[val_idx]
+        loss_weight = train_data.apply(lambda row: (len(row['Antigen']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
 
-        train_ds = EpitopeDataset(train_seq, train_lab)
-        val_ds = EpitopeDataset(val_seq, val_lab)
+        train_ds = EpitopeDataset(train_data, x_col='Antigen', y_col='Y')
+        val_ds = EpitopeDataset(val_data, x_col='Antigen', y_col='Y')
 
-        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=collate_fn)  # Variable len
-        val_loader = DataLoader(val_ds, batch_size=64)
+        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=tokenizer.collate_batch)  # Variable len
+        val_loader = DataLoader(val_ds, batch_size=64, collate_fn=tokenizer.collate_batch)
 
         trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=torch.tensor(loss_weight).to(device))
         trainer.train()

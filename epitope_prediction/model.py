@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class ESMActiveSite(nn.Module):
 
-    def __init__(self, esm_model, out_dim):
+    def __init__(self, esm_model, out_dim=1):
         super().__init__()
         self.esm = esm_model
         self.esm.eval()

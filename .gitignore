@@ -6,3 +6,4 @@
 .ipynb_checkpoints/
 *.pyc
 .idea/
+raw_data_files/
