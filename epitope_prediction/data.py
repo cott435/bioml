@@ -1,8 +1,6 @@
 from torch.utils.data import Dataset
 from tdc.single_pred import Epitope
 from tdc.multi_pred import PPI
-import numpy as np
-import torch
 import matplotlib.pyplot as plt
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -103,29 +101,4 @@ def cluster_sequences(data, data_id, cluster_coef=0.4, force=False, sequence_col
 
     data['cluster_id'] = data[id_col].map(cluster_map)
     return data
-
-class SequenceEpitopeTokenizer:
-
-    def __init__(self, alphabet):
-        self.alphabet = alphabet
-        self.batch_converter = self.alphabet.get_batch_converter()
-        self.available_tok = {'L', 'A', 'G', 'V', 'S', 'E', 'R', 'T', 'I', 'D', 'P', 'K', 'Q', 'N', 'F', 'Y', 'M', 'H', 'W', 'C', 'X',
-             'B', 'U', 'Z', 'O', '.', '-'}
-
-    def sanitize_sequence(self, seq):
-        return ''.join(c if c in self.available_tok else 'X' for c in seq)
-
-    def collate_batch(self, batch):
-        sequences = [("", self.sanitize_sequence(b[0])) for b in batch]
-        labels_lists = [b[1] for b in batch]
-        batch_labels, batch_strs, batch_tokens = self.batch_converter(sequences)
-        labels = torch.zeros_like(batch_tokens)
-        start = int(self.alphabet.prepend_bos)
-        rows = torch.repeat_interleave(
-            torch.arange(labels.shape[0]),
-            torch.tensor([len(x) for x in labels_lists])
-        )
-        cols = torch.tensor([i for sub in labels_lists for i in sub]) + start
-        labels[rows, cols] = 1
-        return batch_tokens, labels
 

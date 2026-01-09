@@ -18,8 +18,9 @@ class ESMActiveSite(nn.Module):
         )
 
     def forward(self, tokens, sigmoid=False):
-        results = self.esm(tokens, repr_layers=[self.esm.num_layers])
-        embeds = results["representations"][self.esm.num_layers][:, 1:-1, :]  # [B, L, D]
+        """results = self.esm(tokens, repr_layers=[self.esm.num_layers])
+        embeds = results["representations"][self.esm.num_layers][:, 1:-1, :]  # [B, L, D]"""
+        embeds = torch.rand(tokens.shape[0], tokens.shape[1], self.esm.embed_dim)
         logits = self.head(embeds).squeeze(-1)  # [B, L]
         return torch.sigmoid(logits) if sigmoid else logits
 
