@@ -91,13 +91,13 @@ class EpitopeBatcher(ESMBatcher):
     def collate_batch(self, batch):
         sequences, labels_lists = [b[0] for b in batch], [b[1] for b in batch]
         batch_tokens = super().collate_batch(sequences)
-        labels = torch.zeros_like(batch_tokens)
-        start = int(self.alphabet.prepend_bos)
+        reduce = int(self.alphabet.prepend_bos) + int(self.alphabet.append_eos)
+        labels = torch.zeros_like(batch_tokens)[:, reduce:]
         rows = torch.repeat_interleave(
             torch.arange(labels.shape[0]),
             torch.tensor([len(x) for x in labels_lists])
         )
-        cols = torch.tensor([i for sub in labels_lists for i in sub]) + start
+        cols = torch.tensor([i for sub in labels_lists for i in sub])
         labels[rows, cols] = 1
         return batch_tokens, labels
 

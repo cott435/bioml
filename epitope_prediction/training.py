@@ -31,107 +31,75 @@ class Trainer:
         self.max_norm = max_norm if max_norm else float('inf')
 
     def compute_loss(self, embeds, labels):
-        bos_eos_slice = (slice(None), slice(int(self.model.esm.prepend_bos), int(self.model.esm.append_eos)))
-        preds = self.model(embeds)
-        loss = self.criterion(preds, labels[bos_eos_slice].to(preds.dtype))
-        loss_mask = embeds[bos_eos_slice] != 1
-        loss = loss * loss_mask
-        loss = torch.mean(loss.sum(dim=-1) / loss_mask.sum(dim=-1))
-        return loss, preds
+        logits = self.model(embeds)
+        loss = self.criterion(logits, labels.to(logits.dtype))
+        active_mask = self.model.get_active_mask(embeds)
+        loss = loss * active_mask
+        loss = torch.mean(loss.sum(dim=-1) / active_mask.sum(dim=-1))
+        return loss, logits, active_mask
 
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0
-        loop = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}")
+        loop = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.epochs}")
         for embeds, labels in loop:
             embeds, labels = embeds.to(self.device), labels.to(self.device)
-            loss, pred = self.compute_loss(embeds, labels)
+            loss, logits, mask = self.compute_loss(embeds, labels)
             self.optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
             self.optimizer.step()
-            total_loss += loss.item()
 
-            if self.writer:
-                self.writer.add_scalar('Loss', loss.item(), self.total_steps)
-                self.writer.add_scalar('GradNorm', grad_norm.item(), self.total_steps)
+            total_loss += loss.item()
+            self.log_metrics({'Loss/Training': loss.item(),'GradNorm': grad_norm.item()}, self.total_steps)
             self.total_steps += 1
             loop.set_postfix(loss=loss.item())
         return total_loss / len(self.train_loader)
 
     def validate(self, epoch):
         self.model.eval()
-        all_preds = []
-        all_labels = []
-        all_probs = []
+        all_labels, all_probs = [], []
         total_val_loss = 0
 
         with torch.no_grad():
             for embeds, labels in self.val_loader:
                 embeds, labels = embeds.to(self.device), labels.to(self.device)
-                loss, preds = self.compute_loss(embeds, labels)
+                loss, logits, mask = self.compute_loss(embeds, labels)
                 total_val_loss += loss.item()
-
-                active_indices = (embeds[:, 1:-1] != 1).bool()
-                probs = torch.sigmoid(preds)
-
-                valid_probs = torch.masked_select(probs, active_indices).cpu().numpy()
-                valid_labels = torch.masked_select(labels[:, 1:-1].to(preds.dtype), active_indices).cpu().numpy()
-
-                all_probs.extend(valid_probs)
-                all_labels.extend(valid_labels)
+                probs = torch.sigmoid(logits)
+                all_probs.extend(torch.masked_select(probs, mask).cpu().numpy())
+                all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
         all_labels = np.array(all_labels)
         all_probs = np.array(all_probs)
-        all_preds = (all_probs > 0.5).astype(int)
+        metrics = self.compute_ep_metric(all_probs, all_labels)
+        metrics['Loss/Validation'] = total_val_loss / len(self.val_loader)
 
-        auprc = average_precision_score(all_labels, all_probs)
-        mcc = matthews_corrcoef(all_labels, all_preds)
-        precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='binary')
+        self.log_metrics(metrics, epoch)
+        return metrics
 
-        avg_val_loss = total_val_loss / len(self.val_loader)
-
-        # Log Metrics
+    def log_metrics(self, metrics, step):
         if self.writer:
-            self.writer.add_scalar('Val/Loss', avg_val_loss, epoch)
-            self.writer.add_scalar('Val/AUPRC', auprc, epoch)
-            self.writer.add_scalar('Val/MCC', mcc, epoch)
-            self.writer.add_scalar('Val/F1', f1, epoch)
-
-        return {
-            "loss": avg_val_loss,
-            "auprc": auprc,
-            "mcc": mcc,
-            "f1": f1
-        }
-
-    def validate_(self):
-        self.model.eval()
-        all_preds, all_labels = [], []
-        with torch.no_grad():
-            for embeds, labels in self.val_loader:
-                embeds = embeds.to(self.device)
-                preds = self.model.head(embeds)
-                all_preds.extend(preds.flatten().cpu().numpy())
-                all_labels.extend(labels.flatten().cpu().numpy())
-        auc = roc_auc_score(all_labels, all_preds)
-        precision, recall, f1, _ = precision_recall_fscore_support(all_labels, (np.array(all_preds) > 0.5).astype(int), average='binary')
-        return auc, f1, precision, recall
+            for key, value in metrics.items():
+                self.writer.add_scalar(key, value, step)
 
     def train(self):
         print(f"\n=== Training (Logs: {self.save_dir}) ===")
+        metrics={}
         try:
             for epoch in range(self.epochs):
+                epoch+=1
                 self.train_epoch(epoch)
                 metrics = self.validate(epoch)
-                current_lr = self.scheduler.get_last_lr()[0]
-                print(f"Epoch {epoch + 1}: Loss {metrics['loss']:.4f} | AUC {metrics['auc']:.4f} | MCC {metrics['mcc']:.4f} | AUPRC {metrics['auprc']:.4f}")
-                if metrics['auprc'] > self.best_metric:
-                    self.best_metric = metrics['auprc']
+                print(f"Epoch {epoch}: ", " | ".join([f'{k}: {v:.4f}' for k,v in metrics.items()]))
+                self.log_metrics({'LR': self.scheduler.get_last_lr()[0]}, epoch)
+                if metrics['AUPRC'] > self.best_metric:
+                    self.best_metric = metrics['AUPRC']
                     self.save_checkpoint("best_model.pth")
                 self.scheduler.step()
 
             if self.save_dir:
                 self.load_checkpoint(os.path.join(self.save_dir, "best_model.pth"))
+            return metrics
         finally:
             if self.writer:
                 self.writer.close()
@@ -154,6 +122,14 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.best_metric = checkpoint.get('best_metric', 0.0)
 
+    @staticmethod
+    def compute_ep_metric(probs, labels, thresh=0.5):
+        preds = (probs > thresh).astype(int)
+        auprc = average_precision_score(labels, probs)
+        mcc = matthews_corrcoef(labels, preds)
+        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='binary')
+        return {"AUPRC": auprc, "MCC": mcc, "F1": f1}
+
 
 def run_cross_validation(model, tokenizer, data, n_splits=5, device='cpu'):
 
@@ -173,13 +149,10 @@ def run_cross_validation(model, tokenizer, data, n_splits=5, device='cpu'):
         train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=tokenizer.collate_batch)  # Variable len
         val_loader = DataLoader(val_ds, batch_size=64, collate_fn=tokenizer.collate_batch)
 
-        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight)
-        trainer.train()
+        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, save_dir='./results')
+        final_metrics = trainer.train()
 
-        final_auc, final_f1, _, _ = trainer.validate()
-        fold_results.append({"auc": final_auc, "f1": final_f1})
-        print(f"Fold {fold+1} Best Val AUC: {final_auc:.4f}")
+        fold_results.append(final_metrics)
 
-    avg_auc = sum(r["auc"] for r in fold_results) / n_splits
-    print(f"\nCV Average AUC: {avg_auc:.4f}")
+
 
