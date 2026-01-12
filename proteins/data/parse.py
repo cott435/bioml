@@ -1,58 +1,26 @@
-from torch.utils.data import Dataset
-from tdc.single_pred import Epitope
-from tdc.multi_pred import PPI
-import matplotlib.pyplot as plt
-from Bio import SeqIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
 import subprocess
 from os import path
+import pandas as pd
 
-data_dir = "./raw_data_files"
+root_dir = "./data_files"
 
-def get_tdc_epitope(name, split=False, file_dir=data_dir):
+def get_tdc_epitope(name, split=False, file_dir=root_dir):
+    from tdc.single_pred import Epitope
     data = Epitope(name=name,  path=file_dir)
     return data.get_split() if split else data.get_data()
 
-def get_tdc_ppi(name, split=False, neg_frac=1, file_dir=data_dir):
+def get_tdc_ppi(name, split=False, neg_frac=1, file_dir=root_dir):
+    from tdc.multi_pred import PPI
     data = PPI(name=name, path=file_dir).neg_sample(frac=neg_frac)
     return data.get_split() if split else data.get_data()
 
-def plot_viz(sequences, bind_idx, max_seq_len=None):
-    seq_len = sequences.apply(lambda x: len(x))
-    active_sites = bind_idx.apply(lambda x: len(x))
-    if max_seq_len:
-        active_sites = active_sites[seq_len < max_seq_len]
-        seq_len = seq_len[seq_len < max_seq_len]
-    ratio = active_sites / seq_len
+def df_save(data, name, file_dir=root_dir):
+    file_path = path.join(file_dir, name+'.parquet')
+    data.to_parquet(file_path, engine='pyarrow')
 
-    fig, axs = plt.subplots(3, 1)
-    axs[0].hist(seq_len, bins=100)
-    axs[0].set_title("Hist of Sequence Lengths")
-    axs[1].hist(active_sites, bins=100)
-    axs[1].set_title("Hist of Active Sites")
-    axs[2].hist(ratio, bins=100)
-    axs[2].set_title("Hist of Active Site Ratio")
-    fig.tight_layout()
-
-    fig, axs = plt.subplots(2, 1)
-    axs[0].scatter(seq_len, ratio)
-    axs[0].set_ylabel("Active Site Ratio")
-    axs[1].scatter(seq_len, active_sites)
-    axs[1].set_xlabel("Sequence Length")
-    axs[1].set_ylabel("Active Sites")
-
-
-class EpitopeDataset(Dataset):
-    def __init__(self, data, x_col='X', y_col='Y'):
-        self.sequences = data[x_col]
-        self.binding_idx = data[y_col]
-
-    def __len__(self):
-        return len(self.sequences)
-
-    def __getitem__(self, idx):
-        return self.sequences.iloc[idx], self.binding_idx.iloc[idx]
+def df_load(name, file_dir=root_dir):
+    file_path = path.join(file_dir, name+'.parquet')
+    return pd.read_parquet(file_path, engine='pyarrow')
 
 def parse_cd_hit_clstr(clstr_file, seq_ids_order):
     cluster_map = {}
@@ -67,6 +35,9 @@ def parse_cd_hit_clstr(clstr_file, seq_ids_order):
     return cluster_map
 
 def cluster_sequences(data, data_id, cluster_coef=0.4, force=False, sequence_col='Antigen', id_col='Antigen_ID'):
+    from Bio import SeqIO
+    from Bio.Seq import Seq
+    from Bio.SeqRecord import SeqRecord
     data=data.copy()
     data[id_col] = data[id_col].str.replace(' ', '')
     fasta_path = f"./raw_data_files/{data_id}.fasta"

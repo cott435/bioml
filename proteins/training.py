@@ -1,14 +1,14 @@
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 import torch
-from data import EpitopeDataset
+from data.datasets import EpitopeDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 import os
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, matthews_corrcoef, average_precision_score
+from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 
 
 class Trainer:
@@ -149,7 +149,7 @@ def run_cross_validation(model, tokenizer, data, n_splits=5, device='cpu'):
         train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=tokenizer.collate_batch)  # Variable len
         val_loader = DataLoader(val_ds, batch_size=64, collate_fn=tokenizer.collate_batch)
 
-        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, save_dir='./results')
+        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, save_dir=f'./results/fold{fold+1}')
         final_metrics = trainer.train()
 
         fold_results.append(final_metrics)

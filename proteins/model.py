@@ -19,9 +19,10 @@ class ESMActiveSite(nn.Module):
         self.bos_eos_slice = (slice(None), slice(int(self.esm.prepend_bos), -int(self.esm.append_eos)))
 
     def forward(self, tokens, sigmoid=False):
-        """results = self.esm(tokens, repr_layers=[self.esm.num_layers])
-        embeds = results["representations"][self.esm.num_layers][self.bos_eos_slice]  # [B, L, D]"""
-        embeds = torch.rand(tokens.shape[0], tokens.shape[1], self.esm.embed_dim)[self.bos_eos_slice]
+        with torch.no_grad():
+            results = self.esm(tokens, repr_layers=[self.esm.num_layers])
+        embeds = results["representations"][self.esm.num_layers][self.bos_eos_slice]  # [B, L, D]
+        """embeds = torch.rand(tokens.shape[0], tokens.shape[1], self.esm.embed_dim)[self.bos_eos_slice]"""
         logits = self.head(embeds).squeeze(-1)  # [B, L]
         return torch.sigmoid(logits) if sigmoid else logits
 

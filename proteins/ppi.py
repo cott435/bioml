@@ -1,5 +1,5 @@
 from data import get_tdc_ppi
-from embed import ESMBatcher
+from data.embed import ESMBatcher
 import esm
 import torch
 

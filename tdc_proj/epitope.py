@@ -1,6 +1,6 @@
 from utils import DataProcessor
 from models import Trainer, get_pretrained_model_and_tokenizer, SimpleTransformerClassifier
-from data_parse import get_tdc_epitope
+from data.parse import get_tdc_epitope
 
 data = get_tdc_epitope('IEDB_Jespersen')
 dp = DataProcessor(data, batch_size=32)
