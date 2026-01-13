@@ -2,7 +2,8 @@ import torch
 from torch.utils.data import Dataset
 from typing import Union
 import os
-from parse import root_dir
+from pandas import Series
+from .parse import data_dir
 
 class ESMEmbeddingDataset(Dataset):
     """
@@ -13,7 +14,7 @@ class ESMEmbeddingDataset(Dataset):
         self,
         data_name: str,
         model_name: str,
-        root_dir=root_dir,
+        root_dir=data_dir,
         repr_layer: Union[int, None] = None,
         include_sequence: bool = False,
     ):
