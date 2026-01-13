@@ -23,10 +23,10 @@ def get_tdc_ppi(name, split=False, neg_frac=1, file_dir=data_dir):
 def make_sequence_fasta(
     sequences,
     ids,
-    file_dir=data_dir,
+    save_dir,
     force=False
 ):
-    fasta_path = path.join(file_dir, "sequences.fasta")
+    fasta_path = path.join(save_dir, "sequences.fasta")
     if force or not path.exists(fasta_path):
         from Bio.Seq import Seq
         from Bio.SeqRecord import SeqRecord

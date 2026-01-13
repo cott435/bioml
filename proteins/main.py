@@ -5,6 +5,7 @@ sys.path.append(str(project_root))
 import torch
 from data.parse import get_tdc_epitope, df_save, df_load
 from data.embed import EpitopeBatcher
+from data.datasets import SingleSequenceDS
 from data.pipeline import cluster_sequences
 from model import ESMActiveSite
 from training import run_cross_validation
@@ -13,6 +14,7 @@ import esm
 data_name = 'IEDB_Jespersen'
 model_name = 'esm2_t6_8M_UR50D'
 data = get_tdc_epitope(data_name)
+sl = SingleSequenceDS(data_name, df=data)
 data = cluster_sequences(data, data_name)
 
 
