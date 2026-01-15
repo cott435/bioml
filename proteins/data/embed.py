@@ -1,38 +1,50 @@
-import torch
-from esm import Alphabet
-from typing import List
+from esm.models.esmc import ESMC
+from esm.sdk import client
+from os import path
+from esm.sdk.api import LogitsConfig, LogitsOutput, ESMProtein, ESMProteinError, ProteinType
+from concurrent.futures import ThreadPoolExecutor
+from typing import Sequence
 
-available_tok = {'L', 'A', 'G', 'V', 'S', 'E', 'R', 'T', 'I', 'D', 'P', 'K', 'Q', 'N', 'F', 'Y', 'M',
-                 'H', 'W', 'C', 'X', 'B', 'U', 'Z', 'O', '.', '-'}
+def get_token(token=None):
+    if token is None:
+        from dotenv import load_dotenv
+        from os import getenv
+        load_dotenv()
+        return getenv('FORGE_TOKEN')
+    return token
 
-def sanitize_sequence(seq):
-    return ''.join(c if c in available_tok else 'X' for c in seq)
+class ESMCLocal:
 
-
-class ESMBatcher:
-
-    def __init__(self, alphabet: Alphabet):
-        self.alphabet = alphabet
-        self.batch_converter = self.alphabet.get_batch_converter()
-
-    def collate_batch(self, batch: List[str]):
-        sequences = [("", sanitize_sequence(b)) for b in batch]
-        batch_labels, batch_strs, batch_tokens = self.batch_converter(sequences)
-        return batch_tokens
-
-class EpitopeBatcher(ESMBatcher):
-
-    def collate_batch(self, batch):
-        sequences, labels_lists = [b[0] for b in batch], [b[1] for b in batch]
-        batch_tokens = super().collate_batch(sequences)
-        reduce = int(self.alphabet.prepend_bos) + int(self.alphabet.append_eos)
-        labels = torch.zeros_like(batch_tokens)[:, reduce:]
-        rows = torch.repeat_interleave(
-            torch.arange(labels.shape[0]),
-            torch.tensor([len(x) for x in labels_lists])
-        )
-        cols = torch.tensor([i for sub in labels_lists for i in sub])
-        labels[rows, cols] = 1
-        return batch_tokens, labels
+     def __init__(self, model_name):
+        self.model = ESMC.from_pretrained(model_name)
 
 
+class ESMCForge:
+
+    def __init__(self, model_name, token=None, save_dir=None):
+        self.model = client(model_name, url="https://forge.evolutionaryscale.ai", token=get_token(token))
+        self.save_dir = path.join(save_dir, model_name)
+        self.emb_config = LogitsConfig(sequence=True, return_embeddings=True, return_hidden_states=True)
+
+    def embed_sequence(self, sequence: str) -> LogitsOutput:
+        protein = ESMProtein(sequence=sequence)
+        protein_tensor = self.model.encode(protein)
+        output = self.model.logits(protein_tensor, self.emb_config)
+        return output
+
+    def batch_save(self, sequences: Sequence[ProteinType], ids: Sequence[str]) -> Sequence[LogitsOutput]:
+        with ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(self.embed_sequence, self.model, seq) for seq in sequences
+            ]
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    results.append(ESMProteinError(500, str(e)))
+        # TODO add save method here to replace return method
+        return results
+
+def save_logits_outputs():
+    pass

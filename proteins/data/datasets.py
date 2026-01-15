@@ -50,8 +50,6 @@ class SingleSequenceDS(Dataset):
         plot_seq_info(self.data['X'], self.data['Y'])
 
 class ESM2EmbeddingDS(SingleSequenceDS):
-    """legacy code for esm2. Max embed len is 1024"""
-    # TODO: add sliding window for longer sequences
 
     def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
@@ -79,15 +77,5 @@ class ESM2EmbeddingDS(SingleSequenceDS):
 
 
 
-class EpitopeDataset(Dataset):
-    def __init__(self, data, x_col='X', y_col='Y'):
-        self.sequences = data[x_col]
-        self.binding_idx = data[y_col]
-
-    def __len__(self):
-        return len(self.sequences)
-
-    def __getitem__(self, idx):
-        return self.sequences.iloc[idx], self.binding_idx.iloc[idx]
 
 

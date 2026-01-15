@@ -53,7 +53,6 @@ data = get_tdc_epitope('IEDB_Jespersen')
 
 outputs = batch_embed(model, data["X"].tolist()[:4])
 
-outputs = embed_sequence(model, data["X"].tolist()[0])
 sequence=data["X"].tolist()[0]
 protein = ESMProtein(sequence=sequence)
 protein_tensor = model.encode(protein)

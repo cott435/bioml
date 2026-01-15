@@ -8,3 +8,4 @@
 .idea/
 data_files/
 *.pt
+.env

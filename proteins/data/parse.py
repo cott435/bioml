@@ -3,7 +3,7 @@ data_dir = "./data_files"
 
 def get_tdc_epitope(name, file_dir=data_dir):
     from tdc.single_pred import Epitope
-    mapping = {'Antigen_ID': 'ID', 'Antigen': 'X'}
+    mapping = {'Antigen_ID': 'ID', 'Antigen': 'Sequence'}
     data = Epitope(name=name,  path=file_dir).get_data().rename(columns=mapping)
     data['ID'] = data['ID'].str.replace(" ", "")
     return data
