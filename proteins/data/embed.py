@@ -1,47 +1,12 @@
 import torch
 from esm import Alphabet
-import os
-import subprocess
-from typing import List, Iterable, Optional
-from .parse import data_dir
+from typing import List
 
 available_tok = {'L', 'A', 'G', 'V', 'S', 'E', 'R', 'T', 'I', 'D', 'P', 'K', 'Q', 'N', 'F', 'Y', 'M',
                  'H', 'W', 'C', 'X', 'B', 'U', 'Z', 'O', '.', '-'}
 
 def sanitize_sequence(seq):
     return ''.join(c if c in available_tok else 'X' for c in seq)
-
-def esm_extract_sequences(
-    sequences: List[str],
-    data_name: str,
-    model_name: str,
-    root_dir=data_dir,
-    batch_size: int = 1,
-    repr_layers: Iterable[int] = (-1,),
-    include: Iterable[str] = ("mean",),
-    overwrite: bool = False,
-    fasta_prefix: str = "seq",
-) -> str:
-
-
-    # Build esm extract command
-    cmd = [
-        "esm", "extract",
-        model_name,
-        fasta_path,
-        output_dir,
-        "--batch_size", str(batch_size),
-        "--include", *include,
-    ]
-
-    # Handle repr layers
-    if repr_layers:
-        cmd.extend(["--repr_layers", *map(str, repr_layers)])
-
-    # Run extraction
-    subprocess.run(cmd, check=True)
-
-    return output_dir
 
 
 class ESMBatcher:

@@ -1,11 +1,11 @@
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 import torch
-from data.datasets import EpitopeDataset
+from data.utils import pad_collate_fn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 import os
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
@@ -30,21 +30,19 @@ class Trainer:
         self.save_dir = save_dir
         self.max_norm = max_norm if max_norm else float('inf')
 
-    def compute_loss(self, embeds, labels):
-        logits = self.model(embeds)
+    def compute_loss(self, logits, labels, mask):
         loss = self.criterion(logits, labels.to(logits.dtype))
-        active_mask = self.model.get_active_mask(embeds)
-        loss = loss * active_mask
-        loss = torch.mean(loss.sum(dim=-1) / active_mask.sum(dim=-1))
-        return loss, logits, active_mask
+        loss = torch.mean(loss.sum(dim=-1) / mask.sum(dim=-1))
+        return loss
 
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0
         loop = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.epochs}")
-        for embeds, labels in loop:
+        for embeds, labels, mask in loop:
             embeds, labels = embeds.to(self.device), labels.to(self.device)
-            loss, logits, mask = self.compute_loss(embeds, labels)
+            logits = self.model(embeds)
+            loss = self.compute_loss(logits, labels, mask)
             self.optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
@@ -62,9 +60,10 @@ class Trainer:
         total_val_loss = 0
 
         with torch.no_grad():
-            for embeds, labels in self.val_loader:
+            for embeds, labels, mask in self.val_loader:
                 embeds, labels = embeds.to(self.device), labels.to(self.device)
-                loss, logits, mask = self.compute_loss(embeds, labels)
+                logits = self.model(embeds)
+                loss = self.compute_loss(logits, labels, mask)
                 total_val_loss += loss.item()
                 probs = torch.sigmoid(logits)
                 all_probs.extend(torch.masked_select(probs, mask).cpu().numpy())
@@ -131,23 +130,20 @@ class Trainer:
         return {"AUPRC": auprc, "MCC": mcc, "F1": f1}
 
 
-def run_cross_validation(model, tokenizer, data, n_splits=5, device='cpu'):
+def run_cross_validation(model, dataset, n_splits=5, device='cpu'):
 
     """Separate function for full CV – this is the clean place for it."""
     skf = GroupKFold(n_splits=n_splits)
     fold_results = []
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(data, groups=data['cluster_id'])):
+    data = dataset.data.dropna(subset=['group_id'])
+    for fold, (train_idx, val_idx) in enumerate(skf.split(data, groups=data['group_id'])):
         print(f"\n=== Fold {fold+1}/{n_splits} ===")
-        train_data = data.iloc[train_idx]
-        val_data = data.iloc[val_idx]
-        loss_weight = train_data.apply(lambda row: (len(row['Antigen']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
+        train_ds = Subset(dataset, train_idx)
+        val_ds = Subset(dataset, val_idx)
+        loss_weight = data.iloc[train_idx].apply(lambda row: (len(row['X']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
 
-        train_ds = EpitopeDataset(train_data, x_col='Antigen', y_col='Y')
-        val_ds = EpitopeDataset(val_data, x_col='Antigen', y_col='Y')
-
-        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=tokenizer.collate_batch)  # Variable len
-        val_loader = DataLoader(val_ds, batch_size=64, collate_fn=tokenizer.collate_batch)
+        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=pad_collate_fn)
+        val_loader = DataLoader(val_ds, batch_size=64, collate_fn=pad_collate_fn)
 
         trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, save_dir=f'./results/fold{fold+1}')
         final_metrics = trainer.train()
