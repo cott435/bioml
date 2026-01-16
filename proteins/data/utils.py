@@ -2,13 +2,26 @@ import subprocess
 from os import path
 import pandas as pd
 from .parse import data_dir
-from esm.constants import proteinseq_toks
-from typing import Iterable
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from typing import Iterable, List
 
-def sanitize_sequence(seq):
-    return ''.join(c if c in proteinseq_toks['toks'] else 'X' for c in seq)
+
+def missing_esm_ids(ids: Iterable[str], directory: str) -> List[str]:
+    """
+    Return IDs for which either <id>_embeddings.pt or <id>_hidden_states.pt
+    is missing in the given directory.
+    """
+    missing = []
+
+    for id_ in ids:
+        emb_path = path.join(directory, f"{id_}_embeddings.pt")
+        hid_path = path.join(directory, f"{id_}_hidden_states.pt")
+
+        if not (path.isfile(emb_path) and path.isfile(hid_path)):
+            missing.append(id_)
+
+    return missing
 
 def make_sequence_fasta(
     sequences,
@@ -23,7 +36,6 @@ def make_sequence_fasta(
         from Bio import SeqIO
         records = []
         for seq, sid in zip(sequences, ids):
-            seq = sanitize_sequence(seq)
             records.append(SeqRecord(Seq(seq), id=sid, description=""))
         SeqIO.write(records, fasta_path, "fasta")
         print(f'Wrote sequences to {fasta_path}')

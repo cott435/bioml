@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 from os import path, makedirs
 from pandas import read_parquet
 from .parse import data_dir
-from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, esm_extract_sequences
+from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, esm_extract_sequences, missing_esm_ids
 from proteins.plotting import plot_seq_info
 
 class SingleSequenceDS(Dataset):
@@ -39,7 +39,7 @@ class SingleSequenceDS(Dataset):
     @property
     def fasta_path(self):
         return self._fasta_path if self._fasta_path is not None \
-            else make_sequence_fasta(self.data['X'], self.data['ID'], save_dir=self.base_dir, force=self.force)
+            else make_sequence_fasta(self.data['Sequence'], self.data['ID'], save_dir=self.base_dir, force=self.force)
 
     @property
     def clstr_path(self):
@@ -47,7 +47,32 @@ class SingleSequenceDS(Dataset):
                                                                        cluster_coef=self.cluster_coef)
 
     def plot_seq_info(self):
-        plot_seq_info(self.data['X'], self.data['Y'])
+        plot_seq_info(self.data['Sequence'], self.data['Y'])
+
+
+class ESMCEmbeddingDS(SingleSequenceDS):
+
+    def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
+        super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
+
+        self.embedding_dir = path.join(self.base_dir, model_name)
+        if not path.exists(self.embedding_dir):
+            raise FileNotFoundError(f"Did not find save directory, please create with embed.ESMCForge")
+        missing_ids = missing_esm_ids(self.data['ID'].tolist(), self.embedding_dir)
+        if len(missing_ids)>0:
+            print('Missing ESMC IDs:', missing_ids)
+        self.embed_dim = self[0][0].shape[-1]
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        active_sites = row['Y']
+        emb_file = f"{row['ID']}_embeddings.pt"
+        filepath = path.join(self.embedding_dir, emb_file)
+        emb = torch.load(filepath, map_location="cpu")
+        y = torch.zeros(len(emb))
+        y[active_sites] = 1
+        return emb, y
+
 
 class ESM2EmbeddingDS(SingleSequenceDS):
 
