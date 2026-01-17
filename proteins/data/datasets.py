@@ -1,6 +1,5 @@
 import torch
 from torch.utils.data import Dataset
-from os import path, makedirs
 from pandas import read_parquet
 from .parse import data_dir
 from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, esm_extract_sequences, missing_esm_ids
@@ -9,18 +8,18 @@ from proteins.plotting import plot_seq_info
 class SingleSequenceDS(Dataset):
 
     def __init__(self, data_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
-        self.base_dir = path.join(save_dir, data_name)
-        makedirs(self.base_dir, exist_ok=True)
-        data_path = path.join(self.base_dir, f'finalized_{cluster_coef}_df.parquet')
+        self.base_dir = save_dir / data_name
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        data_path = self.base_dir / f'finalized_{cluster_coef}_df.parquet'
         self.data_name = data_name
-        self._clstr_path = path.join(self.base_dir, f"clustered_{cluster_coef}_sequences.clstr")
-        self._fasta_path = path.join(self.base_dir, "sequences.fasta")
-        self._fasta_path = self._fasta_path if path.exists(self._fasta_path) else None
-        self._clstr_path = self._clstr_path if path.exists(self._clstr_path) else None
+        self._clstr_path = self.base_dir / f"clustered_{cluster_coef}_sequences.clstr"
+        self._fasta_path = self.base_dir / "sequences.fasta"
+        self._fasta_path = self._fasta_path if self._fasta_path.exists() else None
+        self._clstr_path = self._clstr_path if self._clstr_path.exists() else None
         self.force = force
         self.cluster_coef = cluster_coef
 
-        if path.exists(data_path) or force:
+        if data_path.exists() or force:
             self.data = read_parquet(data_path, engine="pyarrow")
         elif df is None:
             raise FileNotFoundError(f"File not found: {self.base_dir} and df=None, please provide data")
@@ -55,8 +54,8 @@ class ESMCEmbeddingDS(SingleSequenceDS):
     def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
 
-        self.embedding_dir = path.join(self.base_dir, model_name)
-        if not path.exists(self.embedding_dir):
+        self.embedding_dir = self.base_dir / model_name
+        if not self.embedding_dir.exists():
             raise FileNotFoundError(f"Did not find save directory, please create with embed.ESMCForge")
         missing_ids = missing_esm_ids(self.data['ID'].tolist(), self.embedding_dir)
         if len(missing_ids)>0:
@@ -67,7 +66,7 @@ class ESMCEmbeddingDS(SingleSequenceDS):
         row = self.data.iloc[idx]
         active_sites = row['Y']
         emb_file = f"{row['ID']}_embeddings.pt"
-        filepath = path.join(self.embedding_dir, emb_file)
+        filepath = self.embedding_dir / emb_file
         emb = torch.load(filepath, map_location="cpu")
         y = torch.zeros(len(emb))
         y[active_sites] = 1
@@ -78,9 +77,9 @@ class ESM2EmbeddingDS(SingleSequenceDS):
 
     def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
-        self.embedding_dir = path.join(self.base_dir, model_name)
-        if not path.exists(self.embedding_dir):
-            makedirs(self.embedding_dir, exist_ok=True)
+        self.embedding_dir = self.base_dir / model_name
+        if not self.embedding_dir.exists():
+            self.embedding_dir.mkdir(exist_ok=True)
             esm_extract_sequences(model_name, self.fasta_path, self.embedding_dir)
         self.embed_dim = self[0][0].shape[-1]
 
@@ -88,7 +87,7 @@ class ESM2EmbeddingDS(SingleSequenceDS):
         row = self.data.iloc[idx]
         active_sites = row['Y']
         emb_file = row['ID'] + ".pt"
-        filepath = path.join(self.embedding_dir, emb_file)
+        filepath = self.embedding_dir / emb_file
         data = torch.load(filepath, map_location="cpu")
         reps = data["representations"]
         repr_layer = max(reps.keys())

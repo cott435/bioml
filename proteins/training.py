@@ -4,7 +4,6 @@ import torch
 from data.utils import pad_collate_fn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
-import os
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import GroupKFold
@@ -97,7 +96,7 @@ class Trainer:
                 self.scheduler.step()
 
             if self.save_dir:
-                self.load_checkpoint(os.path.join(self.save_dir, "best_model.pth"))
+                self.load_checkpoint(self.save_dir / "best_model.pth")
             return metrics
         finally:
             if self.writer:
@@ -106,7 +105,7 @@ class Trainer:
     def save_checkpoint(self, filename="checkpoint.pth"):
         if not self.save_dir:
             return
-        path = os.path.join(self.save_dir, filename)
+        path = self.save_dir / filename
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),

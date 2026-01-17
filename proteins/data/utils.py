@@ -1,13 +1,12 @@
 import subprocess
-from os import path
 import pandas as pd
 from .parse import data_dir
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from typing import Iterable, List
+from pathlib import Path
 
-
-def missing_esm_ids(ids: Iterable[str], directory: str) -> List[str]:
+def missing_esm_ids(ids: Iterable[str], directory: Path) -> List[str]:
     """
     Return IDs for which either <id>_embeddings.pt or <id>_hidden_states.pt
     is missing in the given directory.
@@ -15,10 +14,10 @@ def missing_esm_ids(ids: Iterable[str], directory: str) -> List[str]:
     missing = []
 
     for id_ in ids:
-        emb_path = path.join(directory, f"{id_}_embeddings.pt")
-        hid_path = path.join(directory, f"{id_}_hidden_states.pt")
+        emb_path = directory / f"{id_}_embeddings.pt"
+        hid_path = directory / f"{id_}_hidden_states.pt"
 
-        if not (path.isfile(emb_path) and path.isfile(hid_path)):
+        if not (emb_path.is_file() and hid_path.is_file()):
             missing.append(id_)
 
     return missing
@@ -29,8 +28,8 @@ def make_sequence_fasta(
     save_dir,
     force=False
 ):
-    fasta_path = path.join(save_dir, "sequences.fasta")
-    if force or not path.exists(fasta_path):
+    fasta_path = save_dir / "sequences.fasta"
+    if force or not fasta_path.exists():
         from Bio.Seq import Seq
         from Bio.SeqRecord import SeqRecord
         from Bio import SeqIO
@@ -45,22 +44,22 @@ def make_sequence_fasta(
 
 
 def df_save(data, name='dataframe', file_dir=data_dir, force=False):
-    file_path = path.join(file_dir, f'{name}.parquet')
-    if force or not path.exists(file_path):
+    file_path = file_dir / f'{name}.parquet'
+    if force or not file_path.exists():
         data.to_parquet(file_path, engine='pyarrow')
         print(f'Saved dataframe to {file_path}')
 
 
 def df_load(data_name, file_dir=data_dir):
-    file_path = path.join(file_dir, f'{data_name}.parquet')
+    file_path = file_dir / f'{data_name}.parquet'
     return pd.read_parquet(file_path, engine='pyarrow')
 
 
 def cluster_fasta(fasta_path, cluster_coef=0.5, force=False):
-    base = path.dirname(fasta_path)
-    output_prefix = path.join(base, f"clustered_{cluster_coef}_sequences")
+    base = fasta_path.parent
+    output_prefix = base / f"clustered_{cluster_coef}_sequences"
     clstr_file = output_prefix + ".clstr"
-    if force or not path.exists(clstr_file):
+    if force or not clstr_file.exists():
         if not force:
             print("Clustering file not found, generating new")
         subprocess.run([

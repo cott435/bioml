@@ -1,17 +1,16 @@
 import GEOparse
-import os
 import gseapy as gp
 import asyncio
 import pandas as pd
 from pathlib import Path
 
-raw_data_folder = os.path.join(Path.cwd().parents[0], "raw_data")
+raw_data_folder = Path.cwd().parents[0] / "raw_data"
 
 def get_geoparse(
     gse_id: str = "GSE6207",
-    file_dir: str = raw_data_folder,
+    file_dir: Path = raw_data_folder,
 ):
-    os.makedirs(file_dir, exist_ok=True)
+    file_dir.mkdir(exist_ok=True)
     gse = GEOparse.get_GEO(
         geo=gse_id,
         destdir=file_dir,
