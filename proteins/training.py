@@ -44,7 +44,7 @@ class Trainer:
             loss = self.compute_loss(logits, labels, mask)
             self.optimizer.zero_grad()
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
 
             total_loss += loss.item()
@@ -139,7 +139,7 @@ def run_cross_validation(model, dataset, n_splits=5, device='cpu'):
         print(f"\n=== Fold {fold+1}/{n_splits} ===")
         train_ds = Subset(dataset, train_idx)
         val_ds = Subset(dataset, val_idx)
-        loss_weight = data.iloc[train_idx].apply(lambda row: (len(row['X']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
+        loss_weight = data.iloc[train_idx].apply(lambda row: (len(row['Sequence']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
 
         train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=pad_collate_fn)
         val_loader = DataLoader(val_ds, batch_size=64, collate_fn=pad_collate_fn)

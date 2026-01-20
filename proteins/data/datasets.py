@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from pandas import read_parquet
 from .parse import data_dir
-from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, esm_extract_sequences, missing_esm_ids
+from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, missing_esm_ids
 from proteins.plotting import plot_seq_info
 
 class SingleSequenceDS(Dataset):
@@ -51,15 +51,21 @@ class SingleSequenceDS(Dataset):
 
 class ESMCEmbeddingDS(SingleSequenceDS):
 
-    def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
+    def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir,
+                 force=False, missing='remove', dtype=torch.float32):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
-
+        assert missing in ['raise', 'remove']
         self.embedding_dir = self.base_dir / model_name
+        self.dtype = dtype
         if not self.embedding_dir.exists():
             raise FileNotFoundError(f"Did not find save directory, please create with embed.ESMCForge")
         missing_ids = missing_esm_ids(self.data['ID'].tolist(), self.embedding_dir)
         if len(missing_ids)>0:
-            print('Missing ESMC IDs:', missing_ids)
+            if missing == 'raise':
+                raise ValueError(f"Missing ESMC IDs: {missing_ids}")
+            elif missing == 'remove':
+                self.data = self.data[~self.data['ID'].isin(missing_ids)]
+                print('Removed missing ESMC IDs:', missing_ids)
         self.embed_dim = self[0][0].shape[-1]
 
     def __getitem__(self, idx):
@@ -67,35 +73,8 @@ class ESMCEmbeddingDS(SingleSequenceDS):
         active_sites = row['Y']
         emb_file = f"{row['ID']}_embeddings.pt"
         filepath = self.embedding_dir / emb_file
-        emb = torch.load(filepath, map_location="cpu")
-        y = torch.zeros(len(emb))
-        y[active_sites] = 1
-        return emb, y
-
-
-class ESM2EmbeddingDS(SingleSequenceDS):
-
-    def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
-        super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
-        self.embedding_dir = self.base_dir / model_name
-        if not self.embedding_dir.exists():
-            self.embedding_dir.mkdir(exist_ok=True)
-            esm_extract_sequences(model_name, self.fasta_path, self.embedding_dir)
-        self.embed_dim = self[0][0].shape[-1]
-
-    def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-        active_sites = row['Y']
-        emb_file = row['ID'] + ".pt"
-        filepath = self.embedding_dir / emb_file
-        data = torch.load(filepath, map_location="cpu")
-        reps = data["representations"]
-        repr_layer = max(reps.keys())
-        emb = reps[repr_layer]
-        if len(row['X']) != len(emb):
-            raise IndexError("X and emb have different length")
-            breakpoint()
-        y = torch.zeros(len(emb))
+        emb = torch.load(filepath, map_location="cpu").to(self.dtype)
+        y = torch.zeros(len(emb)).to(self.dtype)
         y[active_sites] = 1
         return emb, y
 
