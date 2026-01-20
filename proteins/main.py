@@ -15,17 +15,15 @@ model_name = 'esmc_300m'
 base_data_dir = Path.cwd() / 'data' / 'data_files'
 data = get_tdc_epitope(data_name, file_dir=base_data_dir)
 
-"""
+
 sequences = dict(zip(data['ID'], data['Sequence']))
 
-forge_embedder = ESMCForgeEmbedder(model_name, save_dir=base_data_dir / data_name)
-forge_embedder.batch_save(sequences)
+#forge_embedder = ESMCForgeEmbedder(model_name, save_dir=base_data_dir / data_name)
+#forge_embedder.batch_save(sequences)
 
-el = ESMCEmbedder(model_name, save_dir=base_data_dir / data_name)
-for id_, seq in sequences.items():
-    el.save_sequence_embedding(id_, seq)
+el = ESMCBatchEmbedder(model_name, save_dir=base_data_dir / data_name)
 el.batch_save(sequences)
-"""
+
 
 dataset=ESMCEmbeddingDS(data_name, model_name, df=data, save_dir=base_data_dir)
 

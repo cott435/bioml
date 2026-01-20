@@ -8,6 +8,7 @@ from esm.utils.sampling import _BatchedESMProteinTensor
 import torch
 from .utils import missing_esm_ids
 import numpy as np
+from collections import OrderedDict
 
 """
 Note:
@@ -77,12 +78,12 @@ class ESMCEmbedder:
             return [protein_tensor]
         tokens = protein_tensor.sequence
         seqs = []
-        start = 0
-        while start < len(tokens):
+        start, end = 0, 0
+        while start < len(tokens) and end < len(tokens):
             end = min(len(tokens), start + self.max_seq_len)
             chunk = tokens[start:end]
             if len(chunk) < (min_size + self.seq_overlap):
-                seqs[-1] = seqs[-1] + chunk[self.seq_overlap:]
+                seqs[-1] = torch.concat([seqs[-1], chunk[self.seq_overlap:]])
                 break
             seqs.append(chunk)
             start += self.max_seq_len - self.seq_overlap
@@ -121,8 +122,48 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         super().__init__(model_name=model_name, save_dir=save_dir, max_seq_len=max_seq_len, seq_overlap=seq_overlap, device=device)
 
     def _batch_tensorize(self, sequences: dict, max_batch_size) -> _BatchedESMProteinTensor:
-        sequences = [self._tensorize(seq) for seq in sequences]
-        # TODO: pull sequences from protein tensor and extend IDs
+        tensor_sequences = {id_: self._tensorize(seq) for id_, seq in sequences.items()}
+        # TODO: need list of lists containing _BatchedESMProteinTensor
+        #  outer list is batches of sequences, inner list are the splits for those sequences
+        batches = []
+
+        current_keys = []
+        current_values = []
+        current_length = None
+
+        for key, tensor_list in tensor_sequences.items():
+            length = len(tensor_list)
+
+            if current_length is None:
+                current_length = length
+
+            # Flush batch if length changes or batch is full
+            if length != current_length or len(current_keys) >= max_batch_size:
+                stacked = [
+                    _BatchedESMProteinTensor(
+                        sequence=stack_variable_length_tensors(ts, constant_value=self.model.tokenizer.pad_token_id)
+                    )
+                    for ts in zip(*current_values)
+                ]
+                batches.append((current_keys, stacked))
+
+                current_keys = []
+                current_values = []
+                current_length = length
+
+            current_keys.append(key)
+            current_values.append([t.sequence for t in tensor_list])
+
+        # Flush remainder
+        if current_keys:
+            stacked = [
+                _BatchedESMProteinTensor(
+                    sequence=stack_variable_length_tensors(ts, constant_value=self.model.tokenizer.pad_token_id)
+                )
+                for ts in zip(*current_values)
+                ]
+            batches.append((current_keys, stacked))
+
         n_full = len(sequences) // max_batch_size
         extra = len(sequences) % max_batch_size > 0
         for i in range(n_full + (1 if extra else 0)):
@@ -147,7 +188,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         no_split = [(id_, seq) for id_, seq in sorted_sequences if len(seq) <= self.max_seq_len]
         split = [(id_, seq) for id_, seq in sorted_sequences if len(seq) > self.max_seq_len]
 
-        self._batch_tensorize(sequences, batch_size)
+        self._batch_tensorize(OrderedDict(sorted_sequences), batch_size)
 
 
 class ESMCForgeEmbedder(ESMCEmbedder):
