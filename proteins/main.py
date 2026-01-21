@@ -21,13 +21,15 @@ sequences = dict(zip(data['ID'], data['Sequence']))
 #forge_embedder = ESMCForgeEmbedder(model_name, save_dir=base_data_dir / data_name)
 #forge_embedder.batch_save(sequences)
 
-el = ESMCBatchEmbedder(model_name, save_dir=base_data_dir / data_name)
+#single_embedder = ESMCEmbedder(model_name, save_dir=base_data_dir / data_name)
+#single_embedder.save_sequence_embedding('Protein4', sequences['Protein4'])
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+el = ESMCBatchEmbedder(model_name, save_dir=base_data_dir / data_name, device=device)
 el.batch_save(sequences)
 
 
 dataset=ESMCEmbeddingDS(data_name, model_name, df=data, save_dir=base_data_dir)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = SequenceActiveSiteHead(dataset.embed_dim)
 run_cross_validation(model, dataset, device=device)
 

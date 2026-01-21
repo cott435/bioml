@@ -2,13 +2,25 @@ from esm.models.esmc import ESMC
 from esm.sdk import client
 from esm.sdk.api import LogitsConfig, LogitsOutput, ESMProtein, ESMProteinError, ESMProteinTensor
 from concurrent.futures import ThreadPoolExecutor
-from typing import Sequence, List
+from typing import Sequence, List, Tuple
 from esm.utils.misc import stack_variable_length_tensors
 from esm.utils.sampling import _BatchedESMProteinTensor
 import torch
+from scanpy.plotting import embedding
+
 from .utils import missing_esm_ids
 import numpy as np
 from collections import OrderedDict
+
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def timer(label="elapsed"):
+    start = time.perf_counter()
+    yield
+    end = time.perf_counter()
+    print(f"{label}: {end - start:.6f} s")
 
 """
 Note:
@@ -33,7 +45,10 @@ def get_token(token=None):
     return token
 
 class ESMCEmbedder:
-
+    """
+    Embeds protein sequences with ESMC model. Any sequence over max_seq_len is split for embedding
+    Merging is down by averaging over the seq_overlap
+    """
     def __init__(self, model_name='esmc_300m', save_dir=None,
                  max_seq_len=2000, seq_overlap=250, device='cpu'):
         self.save_dir = save_dir / model_name if save_dir else None
@@ -47,7 +62,7 @@ class ESMCEmbedder:
         self.repr_layers = model_repr_layers[model_name]
 
     def _set_model(self, model_name: str):
-        self.model = ESMC.from_pretrained(model_name)
+        self.model = ESMC.from_pretrained(model_name).to(self.device)
 
     def _check_current_data(self, sequences: dict, force=False) -> dict:
         if not force:
@@ -62,8 +77,8 @@ class ESMCEmbedder:
 
     def save_sequence_embedding(self, id_: str, sequence: str) -> None:
         output = self.embed_sequence(sequence)
-        torch.save(output.embeddings[0], self.save_dir / f"{id_}_embeddings.pt")
-        hidden_states = output.hidden_states[:, 0]
+        torch.save(output.embeddings[0, 1:-1], self.save_dir / f"{id_}_embeddings.pt")
+        hidden_states = output.hidden_states[:, 0, 1:-1]
         selected_hidden_states = {layer: hidden_states[layer] for layer in self.repr_layers}
         torch.save(selected_hidden_states, self.save_dir / f"{id_}_hidden_states.pt")
 
@@ -87,15 +102,12 @@ class ESMCEmbedder:
                 break
             seqs.append(chunk)
             start += self.max_seq_len - self.seq_overlap
-        return [ESMProteinTensor(sequence=seq) for seq in seqs]
+        return [ESMProteinTensor(sequence=seq.to(self.device)) for seq in seqs]
 
-    def _merge_split_embeddings(self, embeddings: List[LogitsOutput], trim=True) -> LogitsOutput:
+    def _merge_split_embeddings(self, embeddings: List[LogitsOutput]) -> LogitsOutput:
         targs = ['embeddings', 'hidden_states']
         if len(embeddings) == 1:
-            if not trim:
-                return embeddings[0]
-            output = {att: getattr(embeddings[0], att)[..., 1:-1, :] for att in targs}
-            return LogitsOutput(**output)
+            return embeddings[0]
         unique_lengths = [embeddings[0].embeddings.shape[1]]
         unique_lengths.extend([logits_output.embeddings.shape[1] - self.seq_overlap for logits_output in embeddings[1:]])
         indexes = np.array([0] + unique_lengths).cumsum()
@@ -111,17 +123,22 @@ class ESMCEmbedder:
                 end = indexes[i+1]
                 merged[..., start:end, :] += tensors[i]
                 counts[..., start:end, :] += 1
-            full_emb = merged / counts.clamp(min=1)
-            output[attr] = full_emb[..., 1:-1, :] if trim else full_emb
+            output[attr] = merged / counts.clamp(min=1)
         return LogitsOutput(**output)
 
 
 class ESMCBatchEmbedder(ESMCEmbedder):
 
+    """
+    During batch save, sequences are sorted by length for efficiency with masking.
+    Sequences are split if they are over max_seq_len.
+    Batches are shortened if needed to ensure all sequences in a batch have the same number of splits
+    """
+
     def __init__(self, model_name='esmc_300m', save_dir=None, max_seq_len=2000, seq_overlap=250, device='cpu'):
         super().__init__(model_name=model_name, save_dir=save_dir, max_seq_len=max_seq_len, seq_overlap=seq_overlap, device=device)
 
-    def _batch_tensorize(self, sequences: dict, max_batch_size) -> _BatchedESMProteinTensor:
+    def _batch_tensorize(self, sequences: dict, max_batch_size) -> List[Tuple[List[str], List[_BatchedESMProteinTensor]]]:
         tensor_sequences = {id_: self._tensorize(seq) for id_, seq in sequences.items()}
         # TODO: need list of lists containing _BatchedESMProteinTensor
         #  outer list is batches of sequences, inner list are the splits for those sequences
@@ -133,9 +150,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
 
         for key, tensor_list in tensor_sequences.items():
             length = len(tensor_list)
-
-            if current_length is None:
-                current_length = length
+            current_length = length if current_length is None else current_length
 
             # Flush batch if length changes or batch is full
             if length != current_length or len(current_keys) >= max_batch_size:
@@ -164,12 +179,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
                 ]
             batches.append((current_keys, stacked))
 
-        n_full = len(sequences) // max_batch_size
-        extra = len(sequences) % max_batch_size > 0
-        for i in range(n_full + (1 if extra else 0)):
-            batched = stack_variable_length_tensors(sequences[i * max_batch_size:(i + 1) * max_batch_size],
-                                                    constant_value=self.model.tokenizer.pad_token_id)
-            protein_tensor = _BatchedESMProteinTensor(sequence=batched)
+        return batches
 
     def batch_save(self, sequences: dict, batch_size=16) -> Sequence[LogitsOutput]:
         # TODO:
@@ -185,10 +195,17 @@ class ESMCBatchEmbedder(ESMCEmbedder):
 
         sequences = self._check_current_data(sequences)
         sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
-        no_split = [(id_, seq) for id_, seq in sorted_sequences if len(seq) <= self.max_seq_len]
-        split = [(id_, seq) for id_, seq in sorted_sequences if len(seq) > self.max_seq_len]
-
-        self._batch_tensorize(OrderedDict(sorted_sequences), batch_size)
+        batches = self._batch_tensorize(OrderedDict(sorted_sequences), batch_size)
+        for ids, batch in batches:
+            with timer():
+                embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
+            merged_embeddings = self._merge_split_embeddings(embedding_batch)
+            for i, id_ in enumerate(ids):
+                sequence_slice = slice(1, len(sequences[id_])+1)
+                torch.save(merged_embeddings.embeddings[i, sequence_slice], self.save_dir / f"{id_}_embeddings.pt")
+                hidden_states = merged_embeddings.hidden_states[:, i, sequence_slice]
+                selected_hidden_states = {layer: hidden_states[layer] for layer in self.repr_layers}
+                torch.save(selected_hidden_states, self.save_dir / f"{id_}_hidden_states.pt")
 
 
 class ESMCForgeEmbedder(ESMCEmbedder):
