@@ -6,21 +6,11 @@ from typing import Sequence, List, Tuple
 from esm.utils.misc import stack_variable_length_tensors
 from esm.utils.sampling import _BatchedESMProteinTensor
 import torch
-from scanpy.plotting import embedding
-
 from .utils import missing_esm_ids
 import numpy as np
+from tqdm.auto import tqdm
 from collections import OrderedDict
 
-import time
-from contextlib import contextmanager
-
-@contextmanager
-def timer(label="elapsed"):
-    start = time.perf_counter()
-    yield
-    end = time.perf_counter()
-    print(f"{label}: {end - start:.6f} s")
 
 """
 Note:
@@ -116,7 +106,7 @@ class ESMCEmbedder:
             tensors = [getattr(logits_output, attr) for logits_output in embeddings]
             shape = list(tensors[0].shape)
             shape[-2] = indexes[-1]
-            merged = torch.zeros(*shape, dtype=tensors[0].dtype)
+            merged = torch.zeros(*shape, dtype=tensors[0].dtype, device=self.device)
             counts = torch.zeros_like(merged)
             for i in range(len(unique_lengths)):
                 start=max(0, indexes[i] - self.seq_overlap)
@@ -138,22 +128,19 @@ class ESMCBatchEmbedder(ESMCEmbedder):
     def __init__(self, model_name='esmc_300m', save_dir=None, max_seq_len=2000, seq_overlap=250, device='cpu'):
         super().__init__(model_name=model_name, save_dir=save_dir, max_seq_len=max_seq_len, seq_overlap=seq_overlap, device=device)
 
-    def _batch_tensorize(self, sequences: dict, max_batch_size) -> List[Tuple[List[str], List[_BatchedESMProteinTensor]]]:
+    def _batch_tensorize(self, sequences: dict, max_tok_per_batch) -> List[Tuple[List[str], List[_BatchedESMProteinTensor]]]:
         tensor_sequences = {id_: self._tensorize(seq) for id_, seq in sequences.items()}
-        # TODO: need list of lists containing _BatchedESMProteinTensor
-        #  outer list is batches of sequences, inner list are the splits for those sequences
-        batches = []
 
-        current_keys = []
-        current_values = []
+        batches, current_keys, current_values = [], [],[]
         current_length = None
 
         for key, tensor_list in tensor_sequences.items():
+            if key == 'Protein1135':
+                zz=1
             length = len(tensor_list)
             current_length = length if current_length is None else current_length
-
-            # Flush batch if length changes or batch is full
-            if length != current_length or len(current_keys) >= max_batch_size:
+            tok_in_batch = (length - 1)*self.max_seq_len * (len(current_keys) + 1) + ((len(current_keys) + 1) * len(tensor_list[-1]))
+            if length != current_length or tok_in_batch > max_tok_per_batch: # Flush batch
                 stacked = [
                     _BatchedESMProteinTensor(
                         sequence=stack_variable_length_tensors(ts, constant_value=self.model.tokenizer.pad_token_id)
@@ -162,8 +149,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
                 ]
                 batches.append((current_keys, stacked))
 
-                current_keys = []
-                current_values = []
+                current_keys, current_values = [], []
                 current_length = length
 
             current_keys.append(key)
@@ -181,24 +167,13 @@ class ESMCBatchEmbedder(ESMCEmbedder):
 
         return batches
 
-    def batch_save(self, sequences: dict, batch_size=16) -> Sequence[LogitsOutput]:
-        # TODO:
-        #  Check what ids still need saved
-        #  tokenize all sequences and then split them (must also keep track of sub_ids)
-        #  Sort sequences and their IDs
-        #     Figure out sort method; if plain sort, first half and second half can be far apart and use a lot of memory
-        #     Must use method that quickly finalizes split sequences to free memory (sort sequences <2000 and run)
-        #     Sort sequences >2000 and split and run alternate batches (2000 first, then next tensors to finalize whole sequences)
-        #  Batch and run through model
-        #  merge sequences based on sub IDs
-        #  Save data
-
+    def batch_save(self, sequences: dict, max_tok_per_batch=5000) -> Sequence[LogitsOutput]:
         sequences = self._check_current_data(sequences)
         sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
-        batches = self._batch_tensorize(OrderedDict(sorted_sequences), batch_size)
-        for ids, batch in batches:
-            with timer():
-                embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
+        batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
+        loop = tqdm(batches, desc="Embedding batches")
+        for ids, batch in loop:
+            embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
             merged_embeddings = self._merge_split_embeddings(embedding_batch)
             for i, id_ in enumerate(ids):
                 sequence_slice = slice(1, len(sequences[id_])+1)

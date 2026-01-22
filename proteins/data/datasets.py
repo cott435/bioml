@@ -4,6 +4,7 @@ from pandas import read_parquet
 from .parse import data_dir
 from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, missing_esm_ids
 from proteins.plotting import plot_seq_info
+import pandas as pd
 
 class SingleSequenceDS(Dataset):
 
@@ -19,10 +20,10 @@ class SingleSequenceDS(Dataset):
         self.force = force
         self.cluster_coef = cluster_coef
 
-        if data_path.exists() or force:
+        if data_path.exists() or not force:
             self.data = read_parquet(data_path, engine="pyarrow")
         elif df is None:
-            raise FileNotFoundError(f"File not found: {self.base_dir} and df=None, please provide data")
+            raise FileNotFoundError(f"File not found: {data_path} and df=None, please provide data")
         else:
             column_map={} if column_map is None else column_map
             self.data = df.rename(columns=column_map)
@@ -48,6 +49,27 @@ class SingleSequenceDS(Dataset):
     def plot_seq_info(self):
         plot_seq_info(self.data['Sequence'], self.data['Y'])
 
+    def get_data_dict(self):
+        return dict(zip(self.data['ID'], self.data['Sequence']))
+
+class MultiSequenceDS(SingleSequenceDS):
+
+    def __init__(self, data_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
+        super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
+
+    @property
+    def fasta_path(self):
+        unique_proteins = pd.concat(
+            [
+                self.data[["Protein1_ID", "Protein1"]]
+                .rename(columns={"Protein1_ID": "ID", "Protein1": "Sequence"}),
+                self.data[["Protein2_ID", "Protein2"]]
+                .rename(columns={"Protein2_ID": "ID", "Protein2": "Sequence"}),
+            ],
+            ignore_index=True
+        ).drop_duplicates(subset=["ID"]).reset_index(drop=True)
+        return self._fasta_path if self._fasta_path is not None \
+            else make_sequence_fasta(unique_proteins['Sequence'], unique_proteins['ID'], save_dir=self.base_dir, force=self.force)
 
 class ESMCEmbeddingDS(SingleSequenceDS):
 

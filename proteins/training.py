@@ -1,7 +1,7 @@
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 import torch
-from data.utils import pad_collate_fn
+from proteins.data.utils import pad_collate_fn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 from torch.utils.data import DataLoader, Subset

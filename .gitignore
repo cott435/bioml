@@ -9,3 +9,5 @@
 data_files/
 *.pt
 .env
+credentials.json
+token.pickle

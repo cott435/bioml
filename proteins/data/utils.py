@@ -131,3 +131,12 @@ def pad_collate_fn(batch):
 
     return x_padded, y_padded, mask
 
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def timer(label="elapsed"):
+    start = time.perf_counter()
+    yield
+    end = time.perf_counter()
+    print(f"{label}: {end - start:.6f} s")
