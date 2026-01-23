@@ -1,12 +1,24 @@
-from tdc.multi_pred import PPI, PeptideMHC, ProteinPeptide, AntibodyAff
+from data.parse import *
+from pathlib import Path
+from proteins.data.datasets import MultiSequenceDS, SingleSequenceDS, ESMCMultiDS, ESMCSingleDS
 
-file_dir="./raw_data_files"
+base_data_dir = Path.cwd() / 'data' / 'data_files'
 
-ppi = PPI(name="HuRI", path=file_dir).neg_sample(frac=1).get_data()
 
-peptide_mhc = PeptideMHC(name="MHC1_IEDB-IMGT_Nielsen", path=file_dir).get_data()
-protein_pep = ProteinPeptide(name="brown_mdm2_ace2_12ca5", path=file_dir).get_data()
-antibodyaff = AntibodyAff(name="Protein_SAbDab", path=file_dir).get_data()
+multi = ESMCMultiDS('HuRI', '')
+
+
+
+
+single = get_tdc_epitope(file_dir=base_data_dir)
+ppi_ds = SingleSequenceDS('IEDB_Jespersen', df=single, save_dir=base_data_dir)
+
+ppi = get_tdc_ppi(file_dir=base_data_dir)
+multi = MultiSequenceDS('HuRI', df=ppi, save_dir=base_data_dir)
+
+aab = get_tdc_antibody_aff(file_dir=base_data_dir)
+epp = get_tdc_epitope_binding(file_dir=base_data_dir)
+
 
 
 

@@ -208,4 +208,28 @@ class ESMCForgeEmbedder(ESMCEmbedder):
         return results
 
 
+if __name__ == "__main__":
+    from pathlib import Path
+    import torch
+    from proteins.data.parse import *
+    from proteins.data.datasets import ESMCSingleDS, SingleSequenceDS
+
+    data_name = 'IEDB_Jespersen'
+    model_name = 'esmc_300m'
+    base_data_dir = Path.cwd() / 'data_files'
+
+    data = get_tdc_epitope(data_name, file_dir=base_data_dir)
+    ssd = SingleSequenceDS(data_name, df=data, save_dir=base_data_dir)
+
+    # forge_embedder = ESMCForgeEmbedder(model_name, save_dir=base_data_dir / data_name)
+    # forge_embedder.batch_save(sequences)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+    el = ESMCBatchEmbedder(model_name, save_dir=base_data_dir / data_name, device=device)
+    el.batch_save(ssd.unique_sequences)
+
+    dataset = ESMCSingleDS(data_name, model_name, df=data, save_dir=base_data_dir)
+
+
+
 

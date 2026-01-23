@@ -56,8 +56,8 @@ def df_load(data_name, file_dir=data_dir):
 
 def cluster_fasta(fasta_path, cluster_coef=0.5, force=False):
     base = fasta_path.parent
-    output_prefix = base / f"clustered_{cluster_coef}_sequences"
-    clstr_file = output_prefix + ".clstr"
+    output_prefix = base / f"clustered_{int(cluster_coef*100)}_sequences"
+    clstr_file = output_prefix.with_suffix(".clstr")
     if force or not clstr_file.exists():
         if not force:
             print("Clustering file not found, generating new")
@@ -70,7 +70,7 @@ def cluster_fasta(fasta_path, cluster_coef=0.5, force=False):
     return clstr_file
 
 
-def parse_cd_hit_clstr(clstr_file, seq_ids_order):
+def parse_cd_hit_clstr(clstr_file, seq_ids_order, allow_ungrouped=False):
     cluster_map = {}
     cluster_id = 0
     for line in open(clstr_file):
@@ -80,6 +80,11 @@ def parse_cd_hit_clstr(clstr_file, seq_ids_order):
             seq_id = line.split(">")[1].split("...")[0]
             if seq_id in seq_ids_order:  # Map back to original order
                 cluster_map[seq_id] = cluster_id
+    if not allow_ungrouped:
+        ungrouped = [id_ for id_ in seq_ids_order if id_ not in cluster_map]
+        if len(ungrouped) > 0:
+            start_group_id = max(cluster_map.values()) + 1
+            cluster_map.update({id_: start_group_id+i for i, id_ in enumerate(ungrouped)})
     return cluster_map
 
 

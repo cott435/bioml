@@ -1,8 +1,8 @@
 import numpy as np
-from sklearn.model_selection import KFold, GroupKFold
+from sklearn.model_selection import KFold
 from torch.utils.data import Subset, DataLoader
-from data.utils import pad_collate_fn
-from training import Trainer
+from proteins.data.utils import pad_collate_fn
+from proteins.training.trainers import Trainer
 
 
 class ClusterPairSplitter:
@@ -44,8 +44,7 @@ class ClusterPairSplitter:
         Args:
             X: Placeholder.
             y: Placeholder.
-            cluster_col1: Array-like of cluster IDs for sequence 1.
-            cluster_col2: Array-like of cluster IDs for sequence 2.
+            groups: Dataframe
         """
         c1, c2 = np.split(groups.values, 2)
 
@@ -95,3 +94,8 @@ def run_cross_validation(model, dataset, split_mode='c3', n_splits=5, device='cp
         final_metrics = trainer.train()
 
         fold_results.append(final_metrics)
+
+
+
+
+

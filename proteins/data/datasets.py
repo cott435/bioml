@@ -2,32 +2,35 @@ import torch
 from torch.utils.data import Dataset
 from pandas import read_parquet
 from .parse import data_dir
-from .utils import make_sequence_fasta, cluster_fasta, add_clusters_to_df, missing_esm_ids
+from .utils import make_sequence_fasta, cluster_fasta, parse_cd_hit_clstr, missing_esm_ids
 from proteins.plotting import plot_seq_info
 import pandas as pd
 
 class SingleSequenceDS(Dataset):
 
     def __init__(self, data_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
+        super().__init__()
         self.base_dir = save_dir / data_name
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        data_path = self.base_dir / f'finalized_{cluster_coef}_df.parquet'
+        data_path = self.base_dir / f'finalized_{int(cluster_coef*100)}_df.parquet'
         self.data_name = data_name
-        self._clstr_path = self.base_dir / f"clustered_{cluster_coef}_sequences.clstr"
+        self._clstr_path = self.base_dir / f"clustered_{int(cluster_coef*100)}_sequences.clstr"
         self._fasta_path = self.base_dir / "sequences.fasta"
         self._fasta_path = self._fasta_path if self._fasta_path.exists() else None
         self._clstr_path = self._clstr_path if self._clstr_path.exists() else None
         self.force = force
         self.cluster_coef = cluster_coef
 
-        if data_path.exists() or not force:
+        if data_path.exists() or force:
             self.data = read_parquet(data_path, engine="pyarrow")
+            self.unique_sequences = self._get_unique_sequences()
         elif df is None:
             raise FileNotFoundError(f"File not found: {data_path} and df=None, please provide data")
         else:
             column_map={} if column_map is None else column_map
             self.data = df.rename(columns=column_map)
-            self.data = add_clusters_to_df(self.data, self.clstr_path)
+            self.unique_sequences = self._get_unique_sequences()
+            self._add_clusters_to_df()
             self.data.to_parquet(data_path, engine="pyarrow")
 
     def __len__(self):
@@ -36,15 +39,19 @@ class SingleSequenceDS(Dataset):
     def __getitem__(self, idx):
         return self.data.iloc[idx]
 
+    def _add_clusters_to_df(self):
+        ids = self.data['ID']
+        cluster_map = parse_cd_hit_clstr(self.clstr_path, set(ids))
+        self.data['cluster'] = ids.map(cluster_map)
+
     def _get_unique_sequences(self)-> dict:
         unique_df = self.data.drop_duplicates(subset=["ID"]).reset_index(drop=True)
         return dict(zip(unique_df['ID'], unique_df['Sequence']))
 
     @property
     def fasta_path(self):
-        unique_sequences = self._get_unique_sequences()
         return self._fasta_path if self._fasta_path is not None \
-            else make_sequence_fasta(unique_sequences, save_dir=self.base_dir, force=self.force)
+            else make_sequence_fasta(self.unique_sequences, save_dir=self.base_dir, force=self.force)
 
     @property
     def clstr_path(self):
@@ -54,28 +61,38 @@ class SingleSequenceDS(Dataset):
     def plot_seq_info(self):
         plot_seq_info(self.data['Sequence'], self.data['Y'])
 
-    def get_data_dict(self):
-        return dict(zip(self.data['ID'], self.data['Sequence']))
+    def get_data_groups(self):
+        return self.data['cluster']
 
 class MultiSequenceDS(SingleSequenceDS):
 
     def __init__(self, data_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
 
-
     def _get_unique_sequences(self)-> dict:
         unique_proteins = pd.concat(
             [
-                self.data[["Protein1_ID", "Protein1"]]
-                .rename(columns={"Protein1_ID": "ID", "Protein1": "Sequence"}),
-                self.data[["Protein2_ID", "Protein2"]]
-                .rename(columns={"Protein2_ID": "ID", "Protein2": "Sequence"}),
+                self.data[["ID1", "Sequence1"]]
+                .rename(columns={"ID1": "ID", "Sequence1": "Sequence"}),
+                self.data[["ID2", "Sequence2"]]
+                .rename(columns={"ID2": "ID", "Sequence2": "Sequence"}),
             ],
             ignore_index=True
         ).drop_duplicates(subset=["ID"]).reset_index(drop=True)
         return dict(zip(unique_proteins['ID'], unique_proteins['Sequence']))
 
-class ESMCEmbeddingDS(SingleSequenceDS):
+    def get_data_groups(self):
+        return self.data[['cluster1', 'cluster2']]
+
+    def _add_clusters_to_df(self):
+        cluster_map = parse_cd_hit_clstr(self.clstr_path, set(self.unique_sequences.keys()))
+        self.data['cluster1'] = self.data['ID1'].map(cluster_map)
+        self.data['cluster2'] = self.data['ID2'].map(cluster_map)
+
+    def plot_seq_info(self):
+        raise NotImplementedError()
+
+class ESMCSingleDS(SingleSequenceDS):
 
     def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir,
                  force=False, missing='remove', dtype=torch.float32):
@@ -105,6 +122,33 @@ class ESMCEmbeddingDS(SingleSequenceDS):
         return emb, y
 
 
+class ESMCMultiDS(MultiSequenceDS):
 
+    def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir,
+                 force=False, missing='remove', dtype=torch.float32):
+        super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
+        assert missing in ['raise', 'remove']
+        self.embedding_dir = self.base_dir / model_name
+        self.dtype = dtype
+        if not self.embedding_dir.exists():
+            raise FileNotFoundError(f"Did not find save directory, please create with embed.ESMCForge")
+        missing_ids = missing_esm_ids(self.data['ID'].tolist(), self.embedding_dir)
+        if len(missing_ids)>0:
+            if missing == 'raise':
+                raise ValueError(f"Missing ESMC IDs: {missing_ids}")
+            elif missing == 'remove':
+                self.data = self.data[~self.data['ID'].isin(missing_ids)]
+                print('Removed missing ESMC IDs:', missing_ids)
+        self.embed_dim = self[0][0].shape[-1]
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        active_sites = row['Y']
+        emb_file = f"{row['ID']}_embeddings.pt"
+        filepath = self.embedding_dir / emb_file
+        emb = torch.load(filepath, map_location="cpu").to(self.dtype)
+        y = torch.zeros(len(emb)).to(self.dtype)
+        y[active_sites] = 1
+        return emb, y
 
 
