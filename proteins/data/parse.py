@@ -24,4 +24,7 @@ def get_tdc_epitope_binding(name='weber', split=False, file_dir=data_dir):
     data = TCREpitopeBinding(name=name, path=file_dir)
     return data.get_split() if split else data.get_data()
 
-
+def get_tdc_antibody_aff(name='Protein_SAbDab', split=False, file_dir=data_dir, log_trans=True):
+    from tdc.multi_pred import AntibodyAff
+    data = AntibodyAff(name=name, path=file_dir)
+    return data.get_split() if split else data.get_data()

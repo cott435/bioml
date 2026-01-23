@@ -1,12 +1,9 @@
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 import torch
-from proteins.data.utils import pad_collate_fn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
-from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
-from sklearn.model_selection import GroupKFold
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 
 
@@ -39,7 +36,7 @@ class Trainer:
         total_loss = 0
         loop = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.epochs}")
         for embeds, labels, mask in loop:
-            embeds, labels = embeds.to(self.device), labels.to(self.device)
+            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
             logits = self.model(embeds)
             loss = self.compute_loss(logits, labels, mask)
             self.optimizer.zero_grad()
@@ -60,7 +57,7 @@ class Trainer:
 
         with torch.no_grad():
             for embeds, labels, mask in self.val_loader:
-                embeds, labels = embeds.to(self.device), labels.to(self.device)
+                embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
                 logits = self.model(embeds)
                 loss = self.compute_loss(logits, labels, mask)
                 total_val_loss += loss.item()
@@ -127,27 +124,6 @@ class Trainer:
         mcc = matthews_corrcoef(labels, preds)
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='binary')
         return {"AUPRC": auprc, "MCC": mcc, "F1": f1}
-
-
-def run_cross_validation(model, dataset, n_splits=5, device='cpu'):
-
-    """Separate function for full CV – this is the clean place for it."""
-    skf = GroupKFold(n_splits=n_splits)
-    fold_results = []
-    data = dataset.data.dropna(subset=['group_id'])
-    for fold, (train_idx, val_idx) in enumerate(skf.split(data, groups=data['group_id'])):
-        print(f"\n=== Fold {fold+1}/{n_splits} ===")
-        train_ds = Subset(dataset, train_idx)
-        val_ds = Subset(dataset, val_idx)
-        loss_weight = data.iloc[train_idx].apply(lambda row: (len(row['Sequence']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
-
-        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=pad_collate_fn)
-        val_loader = DataLoader(val_ds, batch_size=64, collate_fn=pad_collate_fn)
-
-        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, save_dir=f'./results/fold{fold+1}')
-        final_metrics = trainer.train()
-
-        fold_results.append(final_metrics)
 
 
 

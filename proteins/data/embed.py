@@ -22,8 +22,8 @@ Note:
 """
 
 model_repr_layers = {
-    'esmc_300m': [4, 9, 14, 19, 24, 25, 26, 27, 28],
-    'esmc_600m': [4, 9, 14, 19, 24, 29, 30, 31, 32, 33, 34]
+    'esmc_300m': [9, 19, 28],
+    'esmc_600m': [9, 19, 29]
 }
 
 def get_token(token=None):
@@ -135,8 +135,6 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         current_length = None
 
         for key, tensor_list in tensor_sequences.items():
-            if key == 'Protein1135':
-                zz=1
             length = len(tensor_list)
             current_length = length if current_length is None else current_length
             tok_in_batch = (length - 1)*self.max_seq_len * (len(current_keys) + 1) + ((len(current_keys) + 1) * len(tensor_list[-1]))
@@ -171,7 +169,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         sequences = self._check_current_data(sequences)
         sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
         batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
-        loop = tqdm(batches, desc="Embedding batches")
+        loop = tqdm(batches, desc="Embedding batches") if batches else []
         for ids, batch in loop:
             embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
             merged_embeddings = self._merge_split_embeddings(embedding_batch)

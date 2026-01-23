@@ -36,10 +36,15 @@ class SingleSequenceDS(Dataset):
     def __getitem__(self, idx):
         return self.data.iloc[idx]
 
+    def _get_unique_sequences(self)-> dict:
+        unique_df = self.data.drop_duplicates(subset=["ID"]).reset_index(drop=True)
+        return dict(zip(unique_df['ID'], unique_df['Sequence']))
+
     @property
     def fasta_path(self):
+        unique_sequences = self._get_unique_sequences()
         return self._fasta_path if self._fasta_path is not None \
-            else make_sequence_fasta(self.data['Sequence'], self.data['ID'], save_dir=self.base_dir, force=self.force)
+            else make_sequence_fasta(unique_sequences, save_dir=self.base_dir, force=self.force)
 
     @property
     def clstr_path(self):
@@ -57,8 +62,8 @@ class MultiSequenceDS(SingleSequenceDS):
     def __init__(self, data_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir, force=False):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
 
-    @property
-    def fasta_path(self):
+
+    def _get_unique_sequences(self)-> dict:
         unique_proteins = pd.concat(
             [
                 self.data[["Protein1_ID", "Protein1"]]
@@ -68,8 +73,7 @@ class MultiSequenceDS(SingleSequenceDS):
             ],
             ignore_index=True
         ).drop_duplicates(subset=["ID"]).reset_index(drop=True)
-        return self._fasta_path if self._fasta_path is not None \
-            else make_sequence_fasta(unique_proteins['Sequence'], unique_proteins['ID'], save_dir=self.base_dir, force=self.force)
+        return dict(zip(unique_proteins['ID'], unique_proteins['Sequence']))
 
 class ESMCEmbeddingDS(SingleSequenceDS):
 

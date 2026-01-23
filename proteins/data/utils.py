@@ -24,7 +24,6 @@ def missing_esm_ids(ids: Iterable[str], directory: Path) -> List[str]:
 
 def make_sequence_fasta(
     sequences,
-    ids,
     save_dir,
     force=False
 ):
@@ -34,8 +33,8 @@ def make_sequence_fasta(
         from Bio.SeqRecord import SeqRecord
         from Bio import SeqIO
         records = []
-        for seq, sid in zip(sequences, ids):
-            records.append(SeqRecord(Seq(seq), id=sid, description=""))
+        for id_, seq in sequences.items():
+            records.append(SeqRecord(Seq(seq), id=id_, description=""))
         SeqIO.write(records, fasta_path, "fasta")
         print(f'Wrote sequences to {fasta_path}')
     else:
