@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Callable, Dict, Any, List
 from torch.utils.data import Subset, DataLoader
-from proteins.data.utils import pad_collate_fn
+from proteins.data.utils import pad_collate_fn, save_params_as_csv
 import numpy as np
 import torch
 import optuna
@@ -90,6 +90,9 @@ class OptunaGroupedCV:
         trainer_params = self.sample_params(trial, self.trainer_params)
         all_params=model_params.copy()
         all_params.update(trainer_params)
+        trial_number = f'trial_{trial.number:04d}'
+        save_params_as_csv(self.ckpt_dir / trial_number, *all_params)
+
         print(f'Running trial{trial.number:04d} with params: {all_params}')
         fold_scores = []
         for fold, (train_idx, val_idx) in enumerate(
@@ -108,7 +111,7 @@ class OptunaGroupedCV:
                                     num_workers=num_workers, pin_memory=torch.cuda.is_available())
 
             model = self.model_class(self.dataset.embed_dim, **model_params)
-            trial_number, run_name = f'trial_{trial.number:04d}', f'fold_{fold}'
+            run_name = f'fold_{fold}'
             trainer = self.trainer_class(
                 model,
                 train_loader,
@@ -123,13 +126,13 @@ class OptunaGroupedCV:
             score=trainer.train()
             fold_scores.append(score)
 
-            trial.report(score['AUPRC'], step=fold)
+            trial.report(score, step=fold)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-        mean_scores = {k: float(np.mean([s[k] for s in fold_scores])) for k in ['AURPC', 'MCC', 'F1']}
-        self._record_trial(trial, all_params, fold_scores, mean_scores)
-        return mean_scores['AUPRC']
+        mean_score = float(np.mean(fold_scores))
+        self._record_trial(trial, all_params, fold_scores, mean_score)
+        return mean_score
 
     def optimize(self, n_trials: int, **kwargs):
         self.study.optimize(self.objective, n_trials=n_trials, **kwargs)
@@ -140,7 +143,7 @@ class OptunaGroupedCV:
         trial: optuna.Trial,
         params: Dict[str, Any],
         fold_scores: List[float],
-        mean_scores: Dict[str, float],
+        mean_scores: float,
     ):
         record = {
             "trial": trial.number,

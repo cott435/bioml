@@ -96,9 +96,6 @@ class Trainer:
                     name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
                     self.save_checkpoint(name)
                 self.scheduler.step()
-            if self.ckpt_dir:
-                name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
-                self.load_checkpoint(self.ckpt_dir / name)
             return self.best_metric
         finally:
             if self.writer:
@@ -115,7 +112,7 @@ class Trainer:
             'best_metric': float(self.best_metric)
         }, path)
 
-    def load_checkpoint(self, path):
+    def from_checkpoint(self, path):
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
