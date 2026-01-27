@@ -2,9 +2,11 @@ import torch
 from torch.utils.data import Dataset
 from pandas import read_parquet
 from .parse import data_dir
-from .utils import make_sequence_fasta, cluster_fasta, parse_cd_hit_clstr, missing_esm_ids
+from .utils import make_sequence_fasta, cluster_fasta, parse_cd_hit_clstr
 from proteins.plotting import plot_seq_info
 import pandas as pd
+import numpy as np
+import h5py
 
 class SingleSequenceDS(Dataset):
 
@@ -95,29 +97,30 @@ class MultiSequenceDS(SingleSequenceDS):
 class ESMCSingleDS(SingleSequenceDS):
 
     def __init__(self, data_name, model_name, df=None, cluster_coef=0.5, column_map=None, save_dir=data_dir,
-                 force=False, missing='remove', dtype=torch.float32):
+                 force=False, missing='remove', test=False):
         super().__init__(data_name, df=df, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
         assert missing in ['raise', 'remove']
-        self.embedding_dir = self.base_dir / model_name
-        self.dtype = dtype
-        if not self.embedding_dir.exists():
+        self.file_path = self.base_dir / f'{model_name}_embeddings.h5'
+        if not self.file_path.exists():
             raise FileNotFoundError(f"Did not find save directory, please create with embed.ESMCForge")
-        missing_ids = missing_esm_ids(self.data['ID'].tolist(), self.embedding_dir)
-        if len(missing_ids)>0:
+        self.hdf = h5py.File(self.file_path, 'r')
+        stored_ids = set(self.hdf.keys())
+        n_missing = len(self.unique_sequences) - len(stored_ids)
+        if n_missing>0:
             if missing == 'raise':
-                raise ValueError(f"Missing ESMC IDs: {missing_ids}")
+                raise ValueError(f"Missing ESMC {n_missing} IDs")
             elif missing == 'remove':
-                self.data = self.data[~self.data['ID'].isin(missing_ids)]
-                print('Removed missing ESMC IDs:', missing_ids)
+                self.data = self.data[self.data['ID'].isin(stored_ids)]
+                self.unique_sequences = {id_: self.unique_sequences[id_] for id_ in stored_ids}
+                print(f'Removed missing {n_missing} ESMC IDs:')
         self.embed_dim = self[0][0].shape[-1]
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        active_sites = row['Y']
-        emb_file = f"{row['ID']}_embeddings.pt"
-        filepath = self.embedding_dir / emb_file
-        emb = torch.load(filepath, map_location="cpu").to(self.dtype)
-        y = torch.zeros(len(emb)).to(self.dtype)
+        active_sites = np.array(row['Y'], copy=True)
+        emb_np = self.hdf[row['ID']][:]
+        emb = torch.from_numpy(emb_np)
+        y = torch.zeros(len(emb))
         y[active_sites] = 1
         return emb, y
 

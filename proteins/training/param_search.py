@@ -1,43 +1,45 @@
 from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Callable, Dict, Any, List
 from torch.utils.data import Subset, DataLoader
 from proteins.data.utils import pad_collate_fn
 import numpy as np
+import torch
 import optuna
-from sklearn.model_selection import GroupKFold
-
+from dataclasses import fields
+from .params import ModelParamSpace, TrainerParamSpace, FloatParam, CategoricalParam, IntParam
+from multiprocessing import cpu_count
+print('CPU cores:', cpu_count())
 
 class OptunaGroupedCV:
-    """
-    Optuna objective wrapper for custom neural network training
-    with grouped K-fold cross-validation.
-    """
 
     def __init__(
         self,
         dataset,
         cv_splitter,
-        build_model_fn: Callable[[Dict[str, Any]], Any],
-        train_fn: Callable[..., float],
-        n_splits: int = 5,
+        model_class: Callable,
+        trainer_class: Callable,
+        model_params: ModelParamSpace,
+        trainer_params: TrainerParamSpace,
+        n_splits: int = 4,
         direction: str = "maximize",
         study_name: str | None = None,
-        storage: str | None = None,
-        save_dir: str | Path = "./optuna_results",
+        base_save_dir: str | Path = "./experiments",
+        device: torch.device | str='cpu'
     ):
         self.dataset = dataset
-        self.cv_splitter = cv_splitter
+        self.cv_splitter = cv_splitter(n_splits=n_splits)
 
-        self.build_model_fn = build_model_fn
-        self.train_fn = train_fn
+        self.model_class = model_class
+        self.trainer_class = trainer_class
+        self.model_params = model_params
+        self.trainer_params = trainer_params
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
 
-        self.cv = GroupKFold(n_splits=n_splits)
-
-        self.save_dir = Path(save_dir)
-        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.base_save_dir = Path(base_save_dir)
+        self.base_save_dir.mkdir(parents=True, exist_ok=True)
+        storage = f'sqlite:///{self.base_save_dir/'optuna.db'}'
 
         self.study = optuna.create_study(
             direction=direction,
@@ -46,32 +48,50 @@ class OptunaGroupedCV:
             load_if_exists=True,
         )
 
+        self.save_dir = self.base_save_dir / self.study.study_name
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.trial_dir = self.save_dir / 'trials'
+        self.trial_dir.mkdir(parents=True, exist_ok=True)
+        self.ckpt_dir = self.save_dir / 'checkpoints'
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.logging_dir = self.save_dir / 'logging'
+        self.logging_dir.mkdir(parents=True, exist_ok=True)
+
         self.trial_history: List[Dict[str, Any]] = []
 
-    # -------------------------
-    # Hyperparameter definition
-    # -------------------------
 
-    def sample_params(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """
-        Override this to define the hyperparameter space.
-        """
-        return {
-            "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
-            "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
-            "hidden_dim": trial.suggest_int("hidden_dim", 64, 512),
-            "dropout": trial.suggest_float("dropout", 0.0, 0.5),
-        }
+    def sample_params(self, trial: optuna.Trial, space) -> Dict[str, Any]:
+        params = {}
+        for f in fields(space):
+            spec = getattr(space, f.name)
+            if isinstance(spec, FloatParam):
+                params[f.name] = trial.suggest_float(
+                    f.name, spec.low, spec.high, log=spec.log
+                )
+            elif isinstance(spec, IntParam):
+                params[f.name] = trial.suggest_int(
+                    f.name, spec.low, spec.high, log=spec.log
+                )
+            elif isinstance(spec, CategoricalParam):
+                params[f.name] = trial.suggest_categorical(
+                    f.name, list(spec.choices)
+                )
+            elif isinstance(spec, (int, float)):
+                params[f.name] = spec
+            else:
+                raise TypeError(f"Unsupported param type: {type(spec)}")
+        if 'kernel_size' in params:
+            params['kernel_size'] = 2 * params['kernel_size'] + 1
+        return params
 
-    # -------------------------
-    # Objective
-    # -------------------------
 
     def objective(self, trial: optuna.Trial) -> float:
-        params = self.sample_params(trial)
-
+        model_params = self.sample_params(trial, self.model_params)
+        trainer_params = self.sample_params(trial, self.trainer_params)
+        all_params=model_params.copy()
+        all_params.update(trainer_params)
+        print(f'Running trial{trial.number:04d} with params: {all_params}')
         fold_scores = []
-
         for fold, (train_idx, val_idx) in enumerate(
             self.cv_splitter.split(self.dataset.data, groups=self.dataset.get_data_groups())
         ):
@@ -79,64 +99,58 @@ class OptunaGroupedCV:
             val_ds = Subset(self.dataset, val_idx)
             loss_weight = self.dataset.data.iloc[train_idx].apply(lambda row: (len(row['Sequence']) - len(row['Y'])) / len(row['Y']),
                                                      axis=1).mean().item()
+            bs = trainer_params.pop("batch_size")
+            num_workers = cpu_count() //2 if self.device.type == 'cuda' else 0
+            prefetch_factor = 2 if self.device.type == 'cuda' else None
+            train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, collate_fn=pad_collate_fn,
+                                      pin_memory=torch.cuda.is_available(), num_workers=num_workers, prefetch_factor=prefetch_factor)
+            val_loader = DataLoader(val_ds, batch_size=bs*3, collate_fn=pad_collate_fn, prefetch_factor=prefetch_factor,
+                                    num_workers=num_workers, pin_memory=torch.cuda.is_available())
 
-            train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=pad_collate_fn)
-            val_loader = DataLoader(val_ds, batch_size=64, collate_fn=pad_collate_fn)
-
-            model = self.build_model_fn(params)
-
-            score = self.train_fn(
-                model=model,
-                params=params,
-                X_train=self.X[train_idx],
-                y_train=self.y[train_idx],
-                X_val=self.X[val_idx],
-                y_val=self.y[val_idx],
-                fold=fold,
-                trial=trial,
+            model = self.model_class(self.dataset.embed_dim, **model_params)
+            trial_number, run_name = f'trial_{trial.number:04d}', f'fold_{fold}'
+            trainer = self.trainer_class(
+                model,
+                train_loader,
+                val_loader,
+                device=self.device,
+                loss_weight=loss_weight,
+                ckpt_dir=self.ckpt_dir / trial_number,
+                log_dir=self.logging_dir / trial_number / run_name,
+                run_name=run_name,
+                **trainer_params,
             )
-
+            score=trainer.train()
             fold_scores.append(score)
 
-            # Optional pruning hook
-            trial.report(score, step=fold)
+            trial.report(score['AUPRC'], step=fold)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-        mean_score = float(np.mean(fold_scores))
-
-        self._record_trial(trial, params, fold_scores, mean_score)
-
-        return mean_score
-
-    # -------------------------
-    # Running optimization
-    # -------------------------
+        mean_scores = {k: float(np.mean([s[k] for s in fold_scores])) for k in ['AURPC', 'MCC', 'F1']}
+        self._record_trial(trial, all_params, fold_scores, mean_scores)
+        return mean_scores['AUPRC']
 
     def optimize(self, n_trials: int, **kwargs):
         self.study.optimize(self.objective, n_trials=n_trials, **kwargs)
         self._save_summary()
-
-    # -------------------------
-    # Persistence
-    # -------------------------
 
     def _record_trial(
         self,
         trial: optuna.Trial,
         params: Dict[str, Any],
         fold_scores: List[float],
-        mean_score: float,
+        mean_scores: Dict[str, float],
     ):
         record = {
             "trial": trial.number,
             "params": params,
             "fold_scores": fold_scores,
-            "mean_score": mean_score,
+            "mean_scores": mean_scores,
         }
         self.trial_history.append(record)
 
-        path = self.save_dir / f"trial_{trial.number:04d}.json"
+        path = self.trial_dir / f"trial_{trial.number:04d}.json"
         with open(path, "w") as f:
             json.dump(record, f, indent=2)
 
@@ -148,10 +162,6 @@ class OptunaGroupedCV:
         }
         with open(self.save_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)
-
-    # -------------------------
-    # Convenience
-    # -------------------------
 
     @property
     def best_params(self) -> Dict[str, Any]:

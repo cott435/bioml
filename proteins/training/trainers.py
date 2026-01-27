@@ -5,26 +5,32 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
+from torch.utils.data import DataLoader
 
 
 class Trainer:
     """Handles training, validation, and logging for one run (single split or fold)."""
-    def __init__(self, model, train_loader, val_loader, device, lr=1e-4, epochs=20, max_norm=None,
-                 save_dir=None, loss_weight=None):
-        self.model = model.to(device)
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.device = device
-        self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=0.01)
+    def __init__(self, model, train_loader: DataLoader, val_loader: DataLoader,
+                 device: torch.device | str='cpu',
+                 lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01,
+                 ckpt_dir=None, loss_weight=None, log_dir=None, run_name=None):
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
+        self.model = model.to(self.device)
+        self.train_loader, self.val_loader = train_loader, val_loader
+
+        self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=epochs)
+
         loss_weight = torch.tensor(loss_weight).to(device) if loss_weight is not None else None
         self.criterion = torch.nn.BCEWithLogitsLoss(weight=loss_weight, reduction='none')
-        self.epochs = epochs
-        self.best_metric = -float('inf')
-        self.writer = SummaryWriter(log_dir=save_dir) if save_dir else None
-        self.total_steps = 0
-        self.save_dir = save_dir
+
+        self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
+
         self.max_norm = max_norm if max_norm else float('inf')
+        self.best_metric = -float('inf')
+        self.total_steps = 0
+        self.ckpt_dir, self.run_name, self.epochs = ckpt_dir, run_name, epochs
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     def compute_loss(self, logits, labels, mask):
         loss = self.criterion(logits, labels.to(logits.dtype))
@@ -66,11 +72,11 @@ class Trainer:
                 all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
         all_labels = np.array(all_labels)
         all_probs = np.array(all_probs)
-        metrics = self.compute_ep_metric(all_probs, all_labels)
+        main_score, metrics = self.compute_ep_metric(all_probs, all_labels)
         metrics['Loss/Validation'] = total_val_loss / len(self.val_loader)
 
         self.log_metrics(metrics, epoch)
-        return metrics
+        return main_score
 
     def log_metrics(self, metrics, step):
         if self.writer:
@@ -78,36 +84,35 @@ class Trainer:
                 self.writer.add_scalar(key, value, step)
 
     def train(self):
-        print(f"\n=== Training (Logs: {self.save_dir}) ===")
-        metrics={}
         try:
             for epoch in range(self.epochs):
                 epoch+=1
-                self.train_epoch(epoch)
-                metrics = self.validate(epoch)
-                print(f"Epoch {epoch}: ", " | ".join([f'{k}: {v:.4f}' for k,v in metrics.items()]))
+                #self.train_epoch(epoch)
+                score = self.validate(epoch)
+                print(f"Epoch {epoch} score: {score}")
                 self.log_metrics({'LR': self.scheduler.get_last_lr()[0]}, epoch)
-                if metrics['AUPRC'] > self.best_metric:
-                    self.best_metric = metrics['AUPRC']
-                    self.save_checkpoint("best_model.pth")
+                if score > self.best_metric:
+                    self.best_metric = score
+                    name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
+                    self.save_checkpoint(name)
                 self.scheduler.step()
-
-            if self.save_dir:
-                self.load_checkpoint(self.save_dir / "best_model.pth")
-            return metrics
+            if self.ckpt_dir:
+                name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
+                self.load_checkpoint(self.ckpt_dir / name)
+            return self.best_metric
         finally:
             if self.writer:
                 self.writer.close()
 
     def save_checkpoint(self, filename="checkpoint.pth"):
-        if not self.save_dir:
+        if not self.ckpt_dir:
             return
-        path = self.save_dir / filename
+        path = self.ckpt_dir / filename
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'best_metric': self.best_metric
+            'best_metric': float(self.best_metric)
         }, path)
 
     def load_checkpoint(self, path):
@@ -123,7 +128,7 @@ class Trainer:
         auprc = average_precision_score(labels, probs)
         mcc = matthews_corrcoef(labels, preds)
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='binary')
-        return {"AUPRC": auprc, "MCC": mcc, "F1": f1}
+        return auprc, {"AUPRC": auprc, "MCC": mcc, "F1": f1}
 
 
 

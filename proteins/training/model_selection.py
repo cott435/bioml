@@ -90,7 +90,7 @@ def run_cross_validation(model, dataset, split_mode='c3', n_splits=5, device='cp
         train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=pad_collate_fn)
         val_loader = DataLoader(val_ds, batch_size=64, collate_fn=pad_collate_fn)
 
-        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, save_dir=f'./results/fold{fold+1}')
+        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, ckpt_dir=f'./results/fold{fold+1}')
         final_metrics = trainer.train()
 
         fold_results.append(final_metrics)

@@ -11,3 +11,4 @@ data_files/
 .env
 credentials.json
 token.pickle
+*.h5

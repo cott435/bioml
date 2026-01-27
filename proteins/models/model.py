@@ -1,62 +1,47 @@
 import torch
 import torch.nn as nn
+from .blocks import Conv1dInvBottleNeck, ConvNeXt1DBlock
 
+blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeXt1DBlock,}
 
-class Conv1dBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, expansion_ratio=4, kernel_size=3, stride=1,
-                 activation='relu', dropout=0.1, batch_norm=True):
+class Conv1dStack(nn.Module):
+
+    def __init__(self, in_dim, out_dim=None, hidden_dim=None, layers=1, expansion_ratio=4, kernel_size=3, dilation=1,
+                 activation='relu', dropout=0.1, batch_norm=True, final_bias=True, block_type='Conv1dInvBottleNeck'):
         super().__init__()
-        hidden_dim = in_dim * expansion_ratio
-        activation_fn = nn.ReLU if activation == 'relu' else nn.GELU
-        norm_fn = nn.BatchNorm1d if batch_norm else nn.LayerNorm
+        assert block_type in blocks
+        self.inp_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1) if hidden_dim else nn.Identity()
+        hidden_dim = hidden_dim or in_dim
+        block = blocks[block_type]
+        self.stack = nn.Sequential(*[
+            block(hidden_dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilation,
+                                dropout=dropout, batch_norm=batch_norm, activation=activation)
+            for _ in range(layers)
+        ])
+        self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1, bias=final_bias) if out_dim else nn.Identity()
 
-        self.block = nn.Sequential(
-            nn.Conv1d(in_dim, hidden_dim, kernel_size=1, stride=stride),
-            norm_fn(hidden_dim),
-            activation_fn(),
-
-            nn.Conv1d(hidden_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=kernel_size//2),
-            norm_fn(out_dim),
-            activation_fn(),
-
-            nn.Conv1d(out_dim, out_dim, kernel_size=1, stride=stride),
-            norm_fn(out_dim),
-            nn.Dropout(dropout)
-        )
-
-        self.residual_proj = nn.Conv1d(in_dim, out_dim, kernel_size=1) if in_dim != out_dim else nn.Identity()
-
-    def forward(self, x):  # (B, in_dim, len)
-        residual = self.residual_proj(x)
-        x = self.block(x)
-        return x + residual  # (B, out_dim, len)
+    def forward(self, x):
+        x = self.inp_proj(x)
+        x = self.stack(x)
+        return self.out_proj(x)
 
 
 class SequenceActiveSiteHead(nn.Module):
 
-    def __init__(self, embed_dim, out_dim=1):
+    def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=True,
+                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=3, dilation=1):
         super().__init__()
-        self.out_dim = out_dim
-        self.block = Conv1dBlock(embed_dim, embed_dim)
-        self.proj = nn.Linear(embed_dim, out_dim, bias=False)
+        hidden_dim = hidden_dim or in_dim
+        self.stack = Conv1dStack(in_dim, hidden_dim=hidden_dim, out_dim=out_dim, dropout=dropout,
+                                 activation=activation, batch_norm=batch_norm, layers=layers,
+                                 block_type=block_type, kernel_size=kernel_size, dilation=dilation)
 
     def forward(self, embeds, sigmoid=False):
-        x = self.block(embeds.transpose(1, 2)).transpose(1, 2)
-        x = self.proj(x).squeeze(-1)  # [B, L]
+        x = self.stack(embeds.transpose(1, 2)).transpose(1, 2).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
-
-    def get_active_mask(self, tokens):
-        mask = tokens != self.esm.padding_idx
-        return mask[self.bos_eos_slice]
 
 
 class SequenceInteractionHead(nn.Module):
-    """
-    Transforms two sequences with stacked residual blocks (shared weights),
-    then computes pairwise interaction matrix via matmul.
-
-    Input embeddings are expected to come from the same ESM model.
-    """
 
     def __init__(
             self,
@@ -64,7 +49,6 @@ class SequenceInteractionHead(nn.Module):
             num_layers: int = 3,
             expansion_ratio: int = 4,
             kernel_size: int = 3,
-            stride: int = 1,
             dropout: float = 0.1,
             output_dim: int | None = None,  # optional: project to lower dim before matmul
             final_norm: bool = True,
@@ -78,7 +62,7 @@ class SequenceInteractionHead(nn.Module):
         blocks = []
         current_dim = embed_dim
         for i in range(num_layers):
-            blocks.append(Conv1dBlock(
+            blocks.append(Conv1dInvBottleNeck(
                 current_dim,
                 expansion_ratio=expansion_ratio,
                 kernel_size=kernel_size,
@@ -118,6 +102,7 @@ class SequenceInteractionHead(nn.Module):
         interaction = torch.matmul(t1, t2.transpose(1, 2))
 
         return interaction
+
 
 
 

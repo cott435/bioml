@@ -6,21 +6,6 @@ from torch.nn.utils.rnn import pad_sequence
 from typing import Iterable, List
 from pathlib import Path
 
-def missing_esm_ids(ids: Iterable[str], directory: Path) -> List[str]:
-    """
-    Return IDs for which either <id>_embeddings.pt or <id>_hidden_states.pt
-    is missing in the given directory.
-    """
-    missing = []
-
-    for id_ in ids:
-        emb_path = directory / f"{id_}_embeddings.pt"
-        hid_path = directory / f"{id_}_hidden_states.pt"
-
-        if not (emb_path.is_file() and hid_path.is_file()):
-            missing.append(id_)
-
-    return missing
 
 def make_sequence_fasta(
     sequences,

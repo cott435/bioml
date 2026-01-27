@@ -1,17 +1,29 @@
 from pathlib import Path
-from data.datasets import ESMCSingleDS, SingleSequenceDS
+from data.datasets import ESMCSingleDS
 from proteins.models.model import SequenceActiveSiteHead
-from proteins.training.model_selection import run_cross_validation
 import torch
+from training.param_search import OptunaGroupedCV
+from training.trainers import Trainer
+from sklearn.model_selection import GroupKFold
+from training.params import ModelParamSpace, TrainerParamSpace
+
 
 data_name = 'IEDB_Jespersen'
 model_name = 'esmc_300m'
 base_data_dir = Path.cwd() / 'data' / 'data_files'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir, test=False)
 
-model = SequenceActiveSiteHead(dataset.embed_dim)
-run_cross_validation(model, dataset, device=device)
+results_dir = Path.cwd() / 'experiments'
+model_param_space = ModelParamSpace()
+trainer_param_space = TrainerParamSpace()
+op = OptunaGroupedCV(dataset, GroupKFold, SequenceActiveSiteHead, Trainer, device=device,
+                     base_save_dir=results_dir, study_name='test1',
+                     trainer_params=trainer_param_space, model_params=model_param_space, n_splits=10)
+op.optimize(5)
+
+
+
 
 
