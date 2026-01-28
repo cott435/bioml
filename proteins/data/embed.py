@@ -171,12 +171,15 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         return batches
 
     def batch_save(self, sequences: dict, max_tok_per_batch=5000, force=False):
-        sequences = self._get_new_ids(sequences, force=force)
+        #sequences = self._get_new_ids(sequences, force=force)
         if not sequences:
             return
         sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
         batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
         loop = tqdm(batches, desc="Embedding batches")
+        for ids, batch in loop:
+            embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
+            merged_embeddings = self._merge_split_embeddings(embedding_batch)
         with h5py.File(self.file_path, "w" if force else "a") as hdf:
             for ids, batch in loop:
                 embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
@@ -184,7 +187,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
                 for i, id_ in enumerate(ids):
                     sequence_slice = slice(1, len(sequences[id_])+1)
                     emb = merged_embeddings.embeddings[i, sequence_slice].to(torch.float32).cpu().numpy()
-                    hdf.create_dataset(id_, data=emb, compression="gzip", compression_opts=4)
+                    #hdf.create_dataset(id_, data=emb, compression="gzip", compression_opts=4)
                     # hidden_states = merged_embeddings.hidden_states[:, i, sequence_slice].to(torch.float32)
                     # selected_hidden_states = {layer: hidden_states[layer] for layer in self.repr_layers}
 

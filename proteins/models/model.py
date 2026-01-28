@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .blocks import Conv1dInvBottleNeck, ConvNeXt1DBlock
+from .blocks import Conv1dInvBottleNeck, ConvNeXt1DBlock, ConvLayerNorm
 
 blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeXt1DBlock,}
 
@@ -18,11 +18,21 @@ class Conv1dStack(nn.Module):
                                 dropout=dropout, batch_norm=batch_norm, activation=activation)
             for _ in range(layers)
         ])
+        self.norm = ConvLayerNorm(hidden_dim)
         self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1, bias=final_bias) if out_dim else nn.Identity()
 
     def forward(self, x):
         x = self.inp_proj(x)
         x = self.stack(x)
+        import matplotlib.pyplot as plt
+
+        normed = self.norm(x)
+        normed_out = self.out_proj(normed)
+        plt.figure()
+        plt.hist(normed_out.cpu().detach().numpy().flatten(), bins=100)
+        out = self.out_proj(x)
+        plt.figure()
+        plt.hist(out.cpu().detach().numpy().flatten(), bins=100)
         return self.out_proj(x)
 
 

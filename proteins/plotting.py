@@ -1,7 +1,6 @@
 from matplotlib import pyplot as plt
-
-
-
+import torch
+import numpy as np
 
 def plot_seq_info(sequences, bind_idx, max_seq_len=None):
     seq_len = sequences.apply(lambda x: len(x))
@@ -26,4 +25,15 @@ def plot_seq_info(sequences, bind_idx, max_seq_len=None):
     axs[1].scatter(seq_len, active_sites)
     axs[1].set_xlabel("Sequence Length")
     axs[1].set_ylabel("Active Sites")
+
+
+def hist(x, bin=100):
+    if isinstance(x, torch.Tensor):
+        x = x.cpu().detach().numpy()
+    else:
+        x = np.array(x)
+    plt.hist(x.flatten(), bins=bin)
+
+
+
 

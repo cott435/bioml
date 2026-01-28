@@ -22,7 +22,7 @@ class BinaryFocalLoss(nn.Module):
         loss = focal_weight * bce_loss
 
         if self.alpha is not None:
-            alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss
 
         if self.reduction == 'mean':
