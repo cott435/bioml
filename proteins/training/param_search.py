@@ -91,25 +91,23 @@ class OptunaGroupedCV:
         all_params=model_params.copy()
         all_params.update(trainer_params)
         trial_number = f'trial_{trial.number:04d}'
-        save_params_as_csv(self.ckpt_dir / trial_number, *all_params)
+        save_params_as_csv(self.ckpt_dir / trial_number, all_params)
 
         print(f'Running trial{trial.number:04d} with params: {all_params}')
         fold_scores = []
+        bs = trainer_params.pop("batch_size")
         for fold, (train_idx, val_idx) in enumerate(
             self.cv_splitter.split(self.dataset.data, groups=self.dataset.get_data_groups())
         ):
             train_ds = Subset(self.dataset, train_idx)
             val_ds = Subset(self.dataset, val_idx)
-            loss_weight = self.dataset.data.iloc[train_idx].apply(lambda row: (len(row['Sequence']) - len(row['Y'])) / len(row['Y']),
-                                                     axis=1).mean().item()
-            bs = trainer_params.pop("batch_size")
             num_workers = cpu_count() //2 if self.device.type == 'cuda' else 0
             prefetch_factor = 2 if self.device.type == 'cuda' else None
             train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, collate_fn=pad_collate_fn,
                                       pin_memory=torch.cuda.is_available(), num_workers=num_workers, prefetch_factor=prefetch_factor)
             val_loader = DataLoader(val_ds, batch_size=bs*3, collate_fn=pad_collate_fn, prefetch_factor=prefetch_factor,
                                     num_workers=num_workers, pin_memory=torch.cuda.is_available())
-
+            # TODO: add bias to final logit output
             model = self.model_class(self.dataset.embed_dim, **model_params)
             run_name = f'fold_{fold}'
             trainer = self.trainer_class(
@@ -117,7 +115,6 @@ class OptunaGroupedCV:
                 train_loader,
                 val_loader,
                 device=self.device,
-                loss_weight=loss_weight,
                 ckpt_dir=self.ckpt_dir / trial_number,
                 log_dir=self.logging_dir / trial_number / run_name,
                 run_name=run_name,

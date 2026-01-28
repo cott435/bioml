@@ -36,6 +36,7 @@ class SequenceActiveSiteHead(nn.Module):
                                  activation=activation, batch_norm=batch_norm, layers=layers,
                                  block_type=block_type, kernel_size=kernel_size, dilation=dilation)
 
+
     def forward(self, embeds, sigmoid=False):
         x = self.stack(embeds.transpose(1, 2)).transpose(1, 2).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x

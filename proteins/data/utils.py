@@ -132,22 +132,11 @@ def timer(label="elapsed"):
     print(f"{label}: {end - start:.6f} s")
 
 
-def save_params_as_csv(file_dir: Path, *params):
-    # Combine all dataclasses into a single dictionary
+def save_params_as_csv(file_dir: Path, params):
+    file_dir.mkdir(parents=True, exist_ok=True)
     filepath = file_dir / 'params.csv'
-    flattened_data = {}
-    for idx, param in enumerate(params):
-        param_dict = asdict(param)
-        # Use class name as category; if not available, use index
-        category = param.__class__.__name__ if hasattr(param, '__class__') else f"Param_{idx}"
-        for key, value in param_dict.items():
-            flattened_data[f"{category}.{key}"] = value
-
-    # Write to CSV
     with open(filepath, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        # Write header
         writer.writerow(['Parameter', 'Value'])
-        # Write data
-        for key, value in flattened_data.items():
+        for key, value in params.items():
             writer.writerow([key, value])

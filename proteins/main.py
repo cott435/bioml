@@ -13,7 +13,7 @@ model_name = 'esmc_300m'
 base_data_dir = Path.cwd() / 'data' / 'data_files'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir, test=False)
+dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
 
 results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace()

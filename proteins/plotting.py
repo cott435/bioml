@@ -1,6 +1,8 @@
 from matplotlib import pyplot as plt
 
 
+
+
 def plot_seq_info(sequences, bind_idx, max_seq_len=None):
     seq_len = sequences.apply(lambda x: len(x))
     active_sites = bind_idx.apply(lambda x: len(x))
@@ -24,3 +26,4 @@ def plot_seq_info(sequences, bind_idx, max_seq_len=None):
     axs[1].scatter(seq_len, active_sites)
     axs[1].set_xlabel("Sequence Length")
     axs[1].set_ylabel("Active Sites")
+

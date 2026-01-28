@@ -19,7 +19,7 @@ class CategoricalParam:
 
 @dataclass(frozen=True)
 class ModelParamSpace:
-    hidden_dim: IntParam = IntParam(64, 512)
+    hidden_dim: IntParam = IntParam(128, 512)
     dropout: FloatParam = FloatParam(0.1, 0.35)
     activation: CategoricalParam = CategoricalParam(['relu', 'gelu'])
     batch_norm: CategoricalParam = CategoricalParam([True, False])

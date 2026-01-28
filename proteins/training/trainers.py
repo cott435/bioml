@@ -6,6 +6,7 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 from torch.utils.data import DataLoader
+from .losses import BinaryFocalLoss
 
 
 class Trainer:
@@ -13,7 +14,7 @@ class Trainer:
     def __init__(self, model, train_loader: DataLoader, val_loader: DataLoader,
                  device: torch.device | str='cpu',
                  lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01,
-                 ckpt_dir=None, loss_weight=None, log_dir=None, run_name=None):
+                 ckpt_dir=None, log_dir=None, run_name=None):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
         self.train_loader, self.val_loader = train_loader, val_loader
@@ -21,8 +22,7 @@ class Trainer:
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=epochs)
 
-        loss_weight = torch.tensor(loss_weight).to(device) if loss_weight is not None else None
-        self.criterion = torch.nn.BCEWithLogitsLoss(weight=loss_weight, reduction='none')
+        self.criterion = BinaryFocalLoss()
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
 
@@ -32,10 +32,6 @@ class Trainer:
         self.ckpt_dir, self.run_name, self.epochs = ckpt_dir, run_name, epochs
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    def compute_loss(self, logits, labels, mask):
-        loss = self.criterion(logits, labels.to(logits.dtype))
-        loss = torch.mean(loss.sum(dim=-1) / mask.sum(dim=-1))
-        return loss
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -44,7 +40,7 @@ class Trainer:
         for embeds, labels, mask in loop:
             embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
             logits = self.model(embeds)
-            loss = self.compute_loss(logits, labels, mask)
+            loss = self.criterion(logits, labels, mask=mask)
             self.optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
@@ -65,7 +61,7 @@ class Trainer:
             for embeds, labels, mask in self.val_loader:
                 embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
                 logits = self.model(embeds)
-                loss = self.compute_loss(logits, labels, mask)
+                loss = self.criterion(logits, labels, mask)
                 total_val_loss += loss.item()
                 probs = torch.sigmoid(logits)
                 all_probs.extend(torch.masked_select(probs, mask).cpu().numpy())
@@ -87,7 +83,7 @@ class Trainer:
         try:
             for epoch in range(self.epochs):
                 epoch+=1
-                #self.train_epoch(epoch)
+                self.train_epoch(epoch)
                 score = self.validate(epoch)
                 print(f"Epoch {epoch} score: {score}")
                 self.log_metrics({'LR': self.scheduler.get_last_lr()[0]}, epoch)

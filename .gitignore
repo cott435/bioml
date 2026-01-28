@@ -12,3 +12,6 @@ data_files/
 credentials.json
 token.pickle
 *.h5
+*.pth
+*.db
+experiments/
