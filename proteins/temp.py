@@ -1,33 +1,55 @@
-from esm.models.esmc import ESMC
-from proteins.data.embed import ESMCBatchEmbedder
-from tqdm.auto import tqdm
-from collections import OrderedDict
-from pathlib import Path
+import biotite.sequence as seq
+import biotite.sequence.align as align
+import biotite.sequence.graphics as graphics
+import matplotlib.pyplot as pl
+import py3Dmol
 import torch
-from proteins.data.datasets import ESMCSingleDS, SingleSequenceDS
+from biotite.database import rcsb
+from esm.sdk import client
+from esm.sdk.api import ESMProtein, GenerationConfig
+from esm.utils.structure.protein_chain import ProteinChain
 
-class Embed(ESMCBatchEmbedder):
-
-    def batch_save(self, sequences: dict, max_tok_per_batch=5000, force=False):
-        sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
-        batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
-        loop = tqdm(batches, desc="Embedding batches")
-        for ids, batch in loop:
-            embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
-            merged_embeddings = self._merge_split_embeddings(embedding_batch)
-
-
-data_name = 'IEDB_Jespersen'
-model_name = 'esmc_300m'
-base_data_dir = Path.cwd()  / 'data'/ 'data_files'
-
-ssd = SingleSequenceDS(data_name, save_dir=base_data_dir)
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-el = Embed(model_name, save_dir=base_data_dir / data_name, device=device)
-el.batch_save(ssd.unique_sequences)
-
-d=1
+def get_token(token=None):
+    if token is None:
+        from dotenv import load_dotenv
+        from os import getenv
+        load_dotenv()
+        return getenv('FORGE_TOKEN')
+    return token
 
 
+model = client('esm3-small-2024-08', url="https://forge.evolutionaryscale.ai", token=get_token())
+
+template_gfp = ESMProtein.from_protein_chain(
+    ProteinChain.from_rcsb("1qy3", chain_id="A")
+)
+
+protein = ESMProtein(sequence=template_gfp.sequence)
+
+result = model.generate(
+    protein,
+    GenerationConfig(
+        track="sasa",           # ← this is the key: gets SASA + other function tokens
+        num_steps=1,                # single pass → fast, deterministic-ish
+        temperature=0.0,            # 0 = greedy / highest probability
+    )
+)
+
+# ── Extract SASA (binned)
+# result.function is usually a list or tensor of function tokens per residue
+# SASA is one of the function sub-tracks (typically 16 bins)
+# You need to map bin index → approximate relative or absolute SASA value
+
+sasa_bins = result.function.sasa   # shape ~ [seq_len], values 0–15
+# Or depending on exact SDK version: result.function.data, result.function.sasa_bins, etc.
+
+print("Per-residue SASA bin indices (0–15):", sasa_bins.tolist())
+
+# Optional: rough mapping back to relative SASA (0–1 scale)
+# Approximate mid-points of 16 bins (from paper/training distribution)
+bin_midpoints = [0.0, 0.031, 0.094, 0.156, 0.219, 0.281, 0.344, 0.406,
+                 0.469, 0.531, 0.594, 0.656, 0.719, 0.781, 0.844, 0.95]
+relative_sasa = [bin_midpoints[b] for b in sasa_bins]
+
+print("Approximate relative SASA (0=buried, ~1=exposed):", relative_sasa)
 

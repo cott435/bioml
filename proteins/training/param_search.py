@@ -12,7 +12,8 @@ from .params import ModelParamSpace, TrainerParamSpace, FloatParam, CategoricalP
 from multiprocessing import cpu_count
 print('CPU cores:', cpu_count())
 
-class OptunaSearch:
+
+class OptunaSearchCV:
 
     def __init__(
         self,
@@ -27,11 +28,12 @@ class OptunaSearch:
         study_name: str | None = None,
         base_save_dir: str | Path = "./experiments",
         device: torch.device | str='cpu',
+        single=True
     ):
         self.dataset = dataset
         self.cv_splitter = cv_splitter(n_splits=n_splits)
-        self.cv_splits = [sp for sp in self.cv_splitter.split(self.dataset.data, groups=self.dataset.get_data_groups())]
-
+        cv_splits = [sp for sp in self.cv_splitter.split(self.dataset.data, groups=self.dataset.get_data_groups())]
+        self.cv_splits = cv_splits[0] if single else cv_splits
         self.model_class = model_class
         self.trainer_class = trainer_class
         self.model_params = model_params
@@ -181,3 +183,4 @@ class OptunaSearch:
     @property
     def best_value(self) -> float:
         return self.study.best_value
+

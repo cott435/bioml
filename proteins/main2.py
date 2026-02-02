@@ -2,7 +2,7 @@ from pathlib import Path
 from data.datasets import ESMCSingleDS, MultiSequenceDS, ESMCMultiDS
 from proteins.models.model import SequenceActiveSiteHead
 import torch
-from training.param_search import OptunaSearch
+from training.param_search import OptunaGroupedCV
 from training.trainers import EPTrainer
 from sklearn.model_selection import GroupKFold
 from training.params import ModelParamSpace, TrainerParamSpace
@@ -20,9 +20,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mp
 results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace()
 trainer_param_space = TrainerParamSpace()
-op = OptunaSearch(dataset, GroupKFold, SequenceActiveSiteHead, EPTrainer, device=device,
-                  base_save_dir=results_dir, study_name='test1',
-                  trainer_params=trainer_param_space, model_params=model_param_space, n_splits=10)
+op = OptunaGroupedCV(dataset, GroupKFold, SequenceActiveSiteHead, EPTrainer, device=device,
+                     base_save_dir=results_dir, study_name='test1',
+                     trainer_params=trainer_param_space, model_params=model_param_space, n_splits=10)
 op.optimize(20)
 
 

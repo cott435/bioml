@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from .losses import BinaryFocalLoss
 from proteins.plotting import save_scatter_logits_loss
 import optuna
+from collections import defaultdict
 
 
 class EPTrainer:
@@ -36,7 +37,7 @@ class EPTrainer:
         self.png_dir = png_dir
         self.png_dir.mkdir(exist_ok=True, parents=True)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-        self.val_metrics = []
+        self.val_metrics = defaultdict(list)
 
 
     def train_epoch(self, epoch):
@@ -80,7 +81,9 @@ class EPTrainer:
         all_probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
         main_score, metrics = self.compute_val_metric(all_probs, all_labels)
         save_scatter_logits_loss(all_logits, all_losses, all_labels, self.png_dir/f'{self.run_name}_epoch{epoch}.png')
-        self.val_metrics.append({'labels': all_labels, 'logits': all_logits, 'losses': all_losses})
+        self.val_metrics['labels'].append(all_labels)
+        self.val_metrics['logits'].append(all_logits)
+        self.val_metrics['loses'].append(all_losses)
 
         self.log_metrics(metrics, epoch, prefix='ValMetrics')
         self.log_metrics({'Loss/Validation': total_val_loss / len(self.val_loader)}, epoch)
@@ -92,7 +95,7 @@ class EPTrainer:
                 key = f'{prefix}/{key}' if prefix else key
                 self.writer.add_scalar(key, value, step)
 
-    def train(self, trial=None, start=0):
+    def train(self, trial=None):
         try:
             epochs = tqdm(range(self.epochs), desc="Epochs")
             for epoch in epochs:
@@ -107,9 +110,10 @@ class EPTrainer:
                     self.save_checkpoint(name)
                 self.scheduler.step()
                 if trial is not None:
-                    trial.report(score, start+epoch)
+                    trial.report(score, epoch)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
+            self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
             return self.best_metric
         except optuna.TrialPruned:
             raise optuna.TrialPruned()
