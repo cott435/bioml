@@ -1,8 +1,5 @@
 import numpy as np
 from sklearn.model_selection import KFold
-from torch.utils.data import Subset, DataLoader
-from proteins.data.utils import pad_collate_fn
-from proteins.training.trainers import Trainer
 
 
 class ClusterPairSplitter:
@@ -75,25 +72,6 @@ class ClusterPairSplitter:
             yield train_idx, val_idx
 
 
-def run_cross_validation(model, dataset, split_mode='c3', n_splits=5, device='cpu'):
-
-    """Separate function for full CV – this is the clean place for it."""
-    splitter = ClusterPairSplitter(n_splits=n_splits, split_mode=split_mode)
-    fold_results = []
-    data = dataset.data.dropna(subset=['group_id'])
-    for fold, (train_idx, val_idx) in enumerate(splitter.split(data, groups=data[['cluster1', 'cluster2']])):
-        print(f"\n=== Fold {fold+1}/{n_splits} ===")
-        train_ds = Subset(dataset, train_idx)
-        val_ds = Subset(dataset, val_idx)
-        loss_weight = data.iloc[train_idx].apply(lambda row: (len(row['Sequence']) - len(row['Y']))/len(row['Y']), axis=1).mean().item()
-
-        train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=pad_collate_fn)
-        val_loader = DataLoader(val_ds, batch_size=64, collate_fn=pad_collate_fn)
-
-        trainer = Trainer(model, train_loader, val_loader, device=device, loss_weight=loss_weight, ckpt_dir=f'./results/fold{fold+1}')
-        final_metrics = trainer.train()
-
-        fold_results.append(final_metrics)
 
 
 

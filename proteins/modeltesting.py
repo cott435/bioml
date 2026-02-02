@@ -7,6 +7,7 @@ from proteins.data.utils import pad_collate_fn
 from torch.utils.data import Subset, DataLoader
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 import numpy as np
+from proteins.training.losses import BinaryFocalLoss
 
 data_name = 'IEDB_Jespersen'
 model_name = 'esmc_300m'
@@ -24,24 +25,41 @@ def compute_ep_metric(probs, labels, thresh=0.5):
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='binary')
     return auprc, {"AUPRC": auprc, "MCC": mcc, "F1": f1}
 
-model = SequenceActiveSiteHead(dataset.embed_dim, layers=3, kernel_size=7, batch_norm=True,
-                               hidden_dim=203,
-                               block_type='Conv1dInvBottleNeck')
+model = SequenceActiveSiteHead(dataset.embed_dim, layers=1, kernel_size=5, batch_norm=False,
+                               hidden_dim=258,
+                               block_type='ConvNeXt1DBlock')
 sd = torch.load(Path.cwd() / 'experiments'/'model.pth', map_location=device)
 model.load_state_dict(sd['model_state_dict'])
 model.to(device)
 model.eval()
-all_labels, all_probs = [], []
+all_labels, all_logits, all_loss = [], [], []
 val_loader = DataLoader(dataset=dataset, batch_size=15, shuffle=False, num_workers=0, collate_fn=pad_collate_fn)
-
+loss_crit = BinaryFocalLoss(reduction='none')
 with torch.no_grad():
     for embeds, labels, mask in val_loader:
         embeds, labels, mask = embeds.to(device), labels.to(device), mask.to(device)
         logits = model(embeds)
-        probs = torch.sigmoid(logits)
-        all_probs.extend(torch.masked_select(probs, mask).cpu().numpy())
+        loss = loss_crit(logits, labels)
+        all_logits.extend(torch.masked_select(logits, mask).cpu().numpy())
         all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
+        all_loss.extend(torch.masked_select(loss, mask).cpu().numpy())
 all_labels = np.array(all_labels)
-all_probs = np.array(all_probs)
+all_logits = np.array(all_logits)
+all_loss = np.array(all_loss)
+all_probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
 main_score, metrics = compute_ep_metric(all_probs, all_labels)
 
+
+from plotting import save_scatter_logits_loss, plt
+save_scatter_logits_loss(all_logits, all_loss, all_labels, 't/ttest', max_points=500000)
+
+
+plt.figure()
+scatter = plt.scatter(all_logits, all_loss, c=all_labels)
+plt.xlabel("Logits")
+plt.ylabel("Loss")
+plt.title("Logits vs Loss colored by label")
+plt.colorbar(scatter, label="Label")
+plt.show()
+
+d=3

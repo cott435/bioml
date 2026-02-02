@@ -7,7 +7,7 @@ blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeX
 class Conv1dStack(nn.Module):
 
     def __init__(self, in_dim, out_dim=None, hidden_dim=None, layers=1, expansion_ratio=4, kernel_size=3, dilation=1,
-                 activation='relu', dropout=0.1, batch_norm=True, final_bias=True, block_type='Conv1dInvBottleNeck'):
+                 activation='relu', dropout=0.1, batch_norm=True, final_bias=True, block_type='Conv1dInvBottleNeck', out_bias=None):
         super().__init__()
         assert block_type in blocks
         self.inp_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1) if hidden_dim else nn.Identity()
@@ -20,35 +20,32 @@ class Conv1dStack(nn.Module):
         ])
         self.norm = ConvLayerNorm(hidden_dim)
         self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1, bias=final_bias) if out_dim else nn.Identity()
+        if out_dim and out_bias:
+            with torch.no_grad():
+                self.out_proj.bias.fill_(out_bias)
 
     def forward(self, x):
         x = self.inp_proj(x)
         x = self.stack(x)
-        import matplotlib.pyplot as plt
-
-        normed = self.norm(x)
-        normed_out = self.out_proj(normed)
-        plt.figure()
-        plt.hist(normed_out.cpu().detach().numpy().flatten(), bins=100)
-        out = self.out_proj(x)
-        plt.figure()
-        plt.hist(out.cpu().detach().numpy().flatten(), bins=100)
+        x = self.norm(x)
         return self.out_proj(x)
 
 
 class SequenceActiveSiteHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=True,
-                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=3, dilation=1):
+                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, dilation=1, inp_norm=True, out_bias=0):
         super().__init__()
         hidden_dim = hidden_dim or in_dim
+        self.inp_norm = nn.LayerNorm(in_dim) if inp_norm else nn.Identity()
         self.stack = Conv1dStack(in_dim, hidden_dim=hidden_dim, out_dim=out_dim, dropout=dropout,
                                  activation=activation, batch_norm=batch_norm, layers=layers,
-                                 block_type=block_type, kernel_size=kernel_size, dilation=dilation)
+                                 block_type=block_type, kernel_size=kernel_size, dilation=dilation, out_bias=out_bias)
 
 
     def forward(self, embeds, sigmoid=False):
-        x = self.stack(embeds.transpose(1, 2)).transpose(1, 2).squeeze(-1)
+        x = self.inp_norm(embeds)
+        x = self.stack(x.transpose(1, 2)).transpose(1, 2).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
 
 

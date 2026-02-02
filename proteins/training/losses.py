@@ -11,7 +11,6 @@ class BinaryFocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, logits, targets, mask=None):
-        # targets should be float in [0,1]
         bce_loss = F.binary_cross_entropy_with_logits(
             logits, targets.float(), reduction='none'
         )
@@ -24,6 +23,8 @@ class BinaryFocalLoss(nn.Module):
         if self.alpha is not None:
             alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss
+        if mask is not None:
+            loss = loss * mask
 
         if self.reduction == 'mean':
             return loss.mean() if mask is None else loss.sum() / mask.sum()

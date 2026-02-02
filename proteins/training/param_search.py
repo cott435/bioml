@@ -12,7 +12,7 @@ from .params import ModelParamSpace, TrainerParamSpace, FloatParam, CategoricalP
 from multiprocessing import cpu_count
 print('CPU cores:', cpu_count())
 
-class OptunaGroupedCV:
+class OptunaSearch:
 
     def __init__(
         self,
@@ -22,14 +22,15 @@ class OptunaGroupedCV:
         trainer_class: Callable,
         model_params: ModelParamSpace,
         trainer_params: TrainerParamSpace,
-        n_splits: int = 4,
+        n_splits: int = 2,
         direction: str = "maximize",
         study_name: str | None = None,
         base_save_dir: str | Path = "./experiments",
-        device: torch.device | str='cpu'
+        device: torch.device | str='cpu',
     ):
         self.dataset = dataset
         self.cv_splitter = cv_splitter(n_splits=n_splits)
+        self.cv_splits = [sp for sp in self.cv_splitter.split(self.dataset.data, groups=self.dataset.get_data_groups())]
 
         self.model_class = model_class
         self.trainer_class = trainer_class
@@ -56,6 +57,8 @@ class OptunaGroupedCV:
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.logging_dir = self.save_dir / 'logging'
         self.logging_dir.mkdir(parents=True, exist_ok=True)
+        self.png_dir = self.save_dir / 'images'
+        self.png_dir.mkdir(parents=True, exist_ok=True)
 
         self.trial_history: List[Dict[str, Any]] = []
 
@@ -76,7 +79,7 @@ class OptunaGroupedCV:
                 params[f.name] = trial.suggest_categorical(
                     f.name, list(spec.choices)
                 )
-            elif isinstance(spec, (int, float)):
+            elif isinstance(spec, (int, float, bool, str)):
                 params[f.name] = spec
             else:
                 raise TypeError(f"Unsupported param type: {type(spec)}")
@@ -84,6 +87,20 @@ class OptunaGroupedCV:
             params['kernel_size'] = 2 * params['kernel_size'] + 1
         return params
 
+    def _get_loaders(self, train_idx, val_idx, batch_size):
+        train_ds = Subset(self.dataset, train_idx)
+        val_ds = Subset(self.dataset, val_idx)
+        num_workers = cpu_count() // 2 if self.device.type == 'cuda' else 0
+        prefetch_factor = 2 if self.device.type == 'cuda' else None
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=pad_collate_fn,
+                                  pin_memory=torch.cuda.is_available(), num_workers=num_workers,
+                                  prefetch_factor=prefetch_factor,
+                                  persistent_workers=self.device.type == 'cuda')
+        val_loader = DataLoader(val_ds, batch_size=batch_size * 3, collate_fn=pad_collate_fn,
+                                prefetch_factor=prefetch_factor,
+                                num_workers=num_workers, pin_memory=torch.cuda.is_available(),
+                                persistent_workers=self.device.type == 'cuda')
+        return train_loader, val_loader
 
     def objective(self, trial: optuna.Trial) -> float:
         model_params = self.sample_params(trial, self.model_params)
@@ -92,23 +109,18 @@ class OptunaGroupedCV:
         all_params.update(trainer_params)
         trial_number = f'trial_{trial.number:04d}'
         save_params_as_csv(self.ckpt_dir / trial_number, all_params)
+        epochs=20
 
         print(f'Running trial{trial.number:04d} with params: {all_params}')
         fold_scores = []
-        bs = trainer_params.pop("batch_size")
-        for fold, (train_idx, val_idx) in enumerate(
-            self.cv_splitter.split(self.dataset.data, groups=self.dataset.get_data_groups())
-        ):
-            train_ds = Subset(self.dataset, train_idx)
-            val_ds = Subset(self.dataset, val_idx)
-            num_workers = cpu_count() //2 if self.device.type == 'cuda' else 0
-            prefetch_factor = 2 if self.device.type == 'cuda' else None
-            train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, collate_fn=pad_collate_fn,
-                                      pin_memory=torch.cuda.is_available(), num_workers=num_workers, prefetch_factor=prefetch_factor)
-            val_loader = DataLoader(val_ds, batch_size=bs*3, collate_fn=pad_collate_fn, prefetch_factor=prefetch_factor,
-                                    num_workers=num_workers, pin_memory=torch.cuda.is_available())
-            # TODO: add bias to final logit output
-            model = self.model_class(self.dataset.embed_dim, **model_params)
+        batch_size = trainer_params.pop("batch_size")
+        for fold, (train_idx, val_idx) in enumerate(self.cv_splits):
+            train_loader, val_loader = self._get_loaders(train_idx, val_idx, batch_size)
+            training_data = self.dataset.data.iloc[train_idx]
+            pos = training_data['Y'].apply(lambda x: len(x)).sum()
+            neg = training_data['Sequence'].apply(lambda x: len(x)).sum() - pos
+            output_bias = np.log(pos/neg)
+            model = self.model_class(self.dataset.embed_dim, **model_params, out_bias=output_bias)
             run_name = f'fold_{fold}'
             trainer = self.trainer_class(
                 model,
@@ -117,15 +129,14 @@ class OptunaGroupedCV:
                 device=self.device,
                 ckpt_dir=self.ckpt_dir / trial_number,
                 log_dir=self.logging_dir / trial_number / run_name,
+                png_dir=self.png_dir / trial_number,
                 run_name=run_name,
+                epochs=epochs,
                 **trainer_params,
             )
-            score=trainer.train()
+            print(f'Training {run_name}')
+            score=trainer.train(trial, start=fold*epochs)
             fold_scores.append(score)
-
-            trial.report(score, step=fold)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
 
         mean_score = float(np.mean(fold_scores))
         self._record_trial(trial, all_params, fold_scores, mean_score)

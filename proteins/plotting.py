@@ -29,11 +29,78 @@ def plot_seq_info(sequences, bind_idx, max_seq_len=None):
 
 def hist(x, bin=100):
     if isinstance(x, torch.Tensor):
-        x = x.cpu().detach().numpy()
+        x = x.to(torch.float32).cpu().detach().numpy()
     else:
         x = np.array(x)
+    plt.figure()
     plt.hist(x.flatten(), bins=bin)
 
+def apply_mask(x, mask):
+    x, mask = x.reshape(-1), mask.reshape(-1)
+    return x[mask]
+
+def hists(xs, bin=100, name=None, mask=None):
+    if not isinstance(xs, list):
+        xs = [xs]
+    size = len(xs) * 4
+    fig, axs = plt.subplots(len(xs), 1, figsize=(10, size))
+
+    for i, ax in enumerate(axs.flatten()):
+        x = xs[i]
+        if mask is not None:
+            x = apply_mask(x, mask)
+        if isinstance(x, torch.Tensor):
+            x = x.to(torch.float32).cpu().detach().numpy()
+        else:
+            x = np.array(x)
+        x = x.flatten()
+        q1, q3 = np.percentile(x, [1, 99])
+        ax.hist(x, bins=bin)
+        ax.set_xlim(q1, q3)
+    fig.tight_layout()
+    if name:
+        fig.savefig(name)
 
 
+def save_scatter_logits_loss(
+    logits,
+    losses,
+    labels,
+    out_path,
+    max_points=200_000,
+    point_size=2,
+    seed=0,
+):
+
+
+    # Convert to numpy
+    x = np.asarray(logits)
+    y = np.asarray(losses)
+    c = np.asarray(labels)
+
+    if x.ndim > 1:
+        x = x[:, 0]
+
+    N = x.shape[0]
+    if N > max_points:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(N, size=max_points, replace=False)
+        x, y, c = x[idx], y[idx], c[idx]
+
+    plt.ioff()  # ensure no interactive redraws
+
+    fig, ax = plt.subplots()
+    ax.scatter(
+        x,
+        y,
+        c=c,
+        s=point_size,
+        linewidths=0,
+        rasterized=True,
+    )
+    ax.set_xlabel("Logit")
+    ax.set_ylabel("Loss")
+
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
