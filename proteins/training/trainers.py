@@ -10,12 +10,14 @@ from .losses import BinaryFocalLoss
 from proteins.plotting import save_scatter_logits_loss
 import optuna
 from collections import defaultdict
+from .schedulers import get_lr_scheduler
 
 
 class EPTrainer:
     """Handles training, validation, and logging for one run (single split or fold)."""
     def __init__(self, model, train_loader: DataLoader, val_loader: DataLoader,
                  device: torch.device | str='cpu',
+                 scheduler_type: str = 'cosine', warmup=True,
                  lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, loss_reduction='mean',
                  ckpt_dir=None, log_dir=None, run_name=None, png_dir=None):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
@@ -23,7 +25,8 @@ class EPTrainer:
         self.train_loader, self.val_loader = train_loader, val_loader
 
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=epochs)
+        self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr,
+                                          warmup_epochs=epochs//10 if warmup else 0)
 
         self.criterion = BinaryFocalLoss(reduction=loss_reduction)
         self._criterion = BinaryFocalLoss(reduction='none')
@@ -52,6 +55,7 @@ class EPTrainer:
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
+            self.scheduler.step()
 
             total_loss += loss.item()
             self.log_metrics({'Loss/Training': loss.item(),'Misc/GradNorm': grad_norm.item()}, self.total_steps)
@@ -80,7 +84,7 @@ class EPTrainer:
         all_losses = np.array(all_losses)
         all_probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
         main_score, metrics = self.compute_val_metric(all_probs, all_labels)
-        save_scatter_logits_loss(all_logits, all_losses, all_labels, self.png_dir/f'{self.run_name}_epoch{epoch}.png')
+        # save_scatter_logits_loss(all_logits, all_losses, all_labels, self.png_dir/f'{self.run_name}_epoch{epoch}.png')
         self.val_metrics['labels'].append(all_labels)
         self.val_metrics['logits'].append(all_logits)
         self.val_metrics['loses'].append(all_losses)
@@ -102,22 +106,25 @@ class EPTrainer:
                 epoch+=1
                 self.train_epoch(epoch)
                 score = self.validate(epoch)
-                print(f"Epoch {epoch} score: {score}")
+                #print(f"Epoch {epoch} score: {score}")
                 self.log_metrics({'Misc/LR': self.scheduler.get_last_lr()[0]}, epoch)
                 if score > self.best_metric:
                     self.best_metric = score
                     name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
                     self.save_checkpoint(name)
-                self.scheduler.step()
+                epochs.set_postfix(val_score=score)
                 if trial is not None:
                     trial.report(score, epoch)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
-            self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
             return self.best_metric
         except optuna.TrialPruned:
-            raise optuna.TrialPruned()
+            return self.best_metric
+        except torch.cuda.OutOfMemoryError as e:
+            print(e)
+            return self.best_metric
         finally:
+            self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
             if self.writer:
                 self.writer.close()
 

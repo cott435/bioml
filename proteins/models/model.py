@@ -4,19 +4,21 @@ from .blocks import Conv1dInvBottleNeck, ConvNeXt1DBlock, ConvLayerNorm
 
 blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeXt1DBlock,}
 
+
 class Conv1dStack(nn.Module):
 
-    def __init__(self, in_dim, out_dim=None, hidden_dim=None, layers=1, expansion_ratio=4, kernel_size=3, dilation=1,
+    def __init__(self, in_dim, out_dim=None, hidden_dim=None, layers=1, expansion_ratio=4, kernel_size=3,
                  activation='relu', dropout=0.1, batch_norm=True, final_bias=True, block_type='Conv1dInvBottleNeck', out_bias=None):
         super().__init__()
         assert block_type in blocks
         self.inp_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1) if hidden_dim else nn.Identity()
         hidden_dim = hidden_dim or in_dim
         block = blocks[block_type]
+        dilations = [2 ** i for i in range(layers)]
         self.stack = nn.Sequential(*[
             block(hidden_dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilation,
                                 dropout=dropout, batch_norm=batch_norm, activation=activation)
-            for _ in range(layers)
+            for dilation in dilations
         ])
         self.norm = ConvLayerNorm(hidden_dim)
         self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1, bias=final_bias) if out_dim else nn.Identity()
