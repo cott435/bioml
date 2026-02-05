@@ -57,7 +57,7 @@ class Conv1dInvBottleNeck(nn.Module):
             norm_fn(hidden_dim),
             activation_fn(),
 
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=kernel_size, dilation=dilation, padding=kernel_size//2, groups=hidden_dim),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=kernel_size, dilation=dilation, padding=dilation*(kernel_size//2), groups=hidden_dim),
             norm_fn(hidden_dim),
             activation_fn(),
 

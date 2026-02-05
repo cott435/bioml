@@ -23,8 +23,8 @@ class ModelParamSpace:
     dropout: FloatParam = FloatParam(0.00, 0.33)
     activation: CategoricalParam = CategoricalParam(['relu', 'gelu'])
     batch_norm: CategoricalParam = CategoricalParam([True, False])
-    layers: IntParam = IntParam(2, 8)
-    kernel_size: IntParam = IntParam(3, 11)
+    layers: IntParam = IntParam(2, 6)
+    kernel_size: IntParam = IntParam(3, 7)
     block_type: CategoricalParam = CategoricalParam(['Conv1dInvBottleNeck', 'ConvNeXt1DBlock'])
     inp_norm: bool = True
 

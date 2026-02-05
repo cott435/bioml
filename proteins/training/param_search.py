@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Callable, Dict, Any, List
 from torch.utils.data import Subset, DataLoader
-from proteins.data.utils import pad_collate_fn, save_params_as_csv
+from proteins.data.utils import pad_collate_fn, save_params_as_csv, ChunkedCollate
 import numpy as np
 import torch
 from sklearn.model_selection import GroupShuffleSplit
@@ -91,11 +91,14 @@ class OptunaSearch:
                 raise TypeError(f"Unsupported param type: {type(spec)}")
         return params
 
-    def _get_loaders(self, train_idx, val_idx, batch_size):
+    def _get_loaders(self, train_idx, val_idx, batch_size, model_params):
         train_ds = Subset(self.dataset, train_idx)
         val_ds = Subset(self.dataset, val_idx)
         num_workers = cpu_count() // 2 if self.device.type == 'cuda' else 0
         prefetch_factor = 2 if self.device.type == 'cuda' else None
+        dilations = [2 ** i for i in range(model_params['layers'])]
+        receptive_field = sum([model_params['kernel_size'] // 2 * dilation for dilation in dilations])
+        collate_fn = ChunkedCollate(overlap=receptive_field, max_len=200)
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=pad_collate_fn,
                                   pin_memory=torch.cuda.is_available(), num_workers=num_workers,
                                   prefetch_factor=prefetch_factor,
@@ -117,7 +120,7 @@ class OptunaSearch:
         print(f'Running trial{trial.number:04d} with params: {all_params}')
         batch_size = trainer_params.pop("batch_size")
         train_idx, val_idx = self.cv_splits
-        train_loader, val_loader = self._get_loaders(train_idx, val_idx, batch_size)
+        train_loader, val_loader = self._get_loaders(train_idx, val_idx, batch_size, model_params)
         training_data = self.dataset.data.iloc[train_idx]
         pos = training_data['Y'].apply(lambda x: len(x)).sum()
         neg = training_data['Sequence'].apply(lambda x: len(x)).sum() - pos

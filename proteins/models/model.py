@@ -36,13 +36,13 @@ class Conv1dStack(nn.Module):
 class SequenceActiveSiteHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=True,
-                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, dilation=1, inp_norm=True, out_bias=0):
+                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, inp_norm=True, out_bias=0):
         super().__init__()
         hidden_dim = hidden_dim or in_dim
         self.inp_norm = nn.LayerNorm(in_dim) if inp_norm else nn.Identity()
         self.stack = Conv1dStack(in_dim, hidden_dim=hidden_dim, out_dim=out_dim, dropout=dropout,
                                  activation=activation, batch_norm=batch_norm, layers=layers,
-                                 block_type=block_type, kernel_size=kernel_size, dilation=dilation, out_bias=out_bias)
+                                 block_type=block_type, kernel_size=kernel_size, out_bias=out_bias)
 
 
     def forward(self, embeds, sigmoid=False):
