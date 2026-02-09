@@ -41,6 +41,9 @@ class SingleSequenceDS(Dataset):
     def __getitem__(self, idx):
         return self.data.iloc[idx]
 
+    def get_lengths(self):
+        return self.data['Sequence'].apply(len).values
+
     def _add_clusters_to_df(self):
         ids = self.data['ID']
         cluster_map = parse_cd_hit_clstr(self.clstr_path, set(ids))

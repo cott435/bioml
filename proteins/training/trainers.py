@@ -28,8 +28,7 @@ class EPTrainer:
         self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr,
                                           warmup_epochs=epochs//10 if warmup else 0)
 
-        self.criterion = BinaryFocalLoss(reduction=loss_reduction)
-        self._criterion = BinaryFocalLoss(reduction='none')
+        self.criterion = BinaryFocalLoss(reduction='none')
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
 
@@ -42,25 +41,80 @@ class EPTrainer:
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.val_metrics = defaultdict(list)
 
+    def train_epoch(self):
+        self.model.eval()
+        total_loss = 0
+        from torch.nn.utils.rnn import pad_sequence
+        loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
+        sub_batches = next(iter(loop))
 
-    def train_epoch(self, epoch):
+        self.optimizer.zero_grad()
+
+        batch = [pad_sequence([z for t in tt for z in t], batch_first=True) for tt in zip(*sub_batches)]
+        embeds, labels, mask = batch
+        embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+        logits_full = self.model(embeds, mask=mask)
+        loss_full = self.criterion(logits_full, labels, mask=mask)
+        loss_normed = loss_full.sum(-1) / labels.sum(-1)
+        loss_full_mean = torch.mean(loss_normed)
+        loss_full_mean.backward()
+        grads = {
+            name: p.grad.detach().clone()
+            for name, p in self.model.named_parameters()
+            if p.grad is not None
+        }
+
+
+        self.optimizer.zero_grad()
+        accumulated_loss = 0
+        accumulated_steps = sum([len(s[0]) for s in sub_batches])
+        sub_losses = []
+        for embeds, labels, mask in sub_batches:
+            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+            logits = self.model(embeds, mask=mask)
+            # test_logits = self.model(torch.concat([embeds, torch.zeros(1, 100, 960, device=self.device, dtype=embeds.dtype)], dim=1), mask=torch.concat([mask, torch.zeros(1, 100, device=self.device, dtype=mask.dtype)], dim=1))
+            loss_ = self.criterion(logits, labels, mask=mask)
+            loss_normed_ = loss_.sum(-1) / labels.sum(-1)
+            sub_losses.append(loss_)
+            loss = loss_normed_.sum() / accumulated_steps
+            loss.backward()
+            accumulated_loss += loss.item()
+        bucket_grads = {
+            name: p.grad.detach().clone()
+            for name, p in self.model.named_parameters()
+            if p.grad is not None
+        }
+        sub_losses = pad_sequence([s for ss in sub_losses for s in ss], batch_first=True)
+        res_grads = {name: torch.abs(bucket_grads[name] - grads[name]).sum() for name in grads}
+
+        d=1
+
+
+    def train_epoch_(self):
         self.model.train()
         total_loss = 0
         loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
-        for embeds, labels, mask in loop:
-            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-            logits = self.model(embeds)
-            loss = self.criterion(logits, labels, mask=mask)
+        for sub_batches in loop:
             self.optimizer.zero_grad()
-            loss.backward()
+            accumulated_loss = 0
+            accumulation_steps = sum([len(s[0]) for s in sub_batches])
+            for embeds, labels, mask in sub_batches:
+                embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+                logits = self.model(embeds, mask=mask)
+                loss = self.criterion(logits, labels, mask=mask)
+                loss = loss.sum(-1) / labels.sum(-1)
+                loss = loss.sum() / accumulation_steps
+                loss.backward()
+                accumulated_loss += loss.item()
+
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
             self.scheduler.step()
 
-            total_loss += loss.item()
-            self.log_metrics({'Loss/Training': loss.item(),'Misc/GradNorm': grad_norm.item()}, self.total_steps)
+            total_loss += accumulated_loss
+            self.log_metrics({'Loss/Training': accumulated_loss,'Misc/GradNorm': grad_norm.item()}, self.total_steps)
             self.total_steps += 1
-            loop.set_postfix(loss=loss.item())
+            loop.set_postfix(loss=accumulated_loss)
         return total_loss / len(self.train_loader)
 
     def validate(self, epoch):
@@ -72,13 +126,13 @@ class EPTrainer:
             loop = tqdm(self.val_loader, desc="Validation", position=1, leave=False)
             for embeds, labels, mask in loop:
                 embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-                logits = self.model(embeds)
+                logits = self.model(embeds, mask=mask)
                 loss = self.criterion(logits, labels, mask)
-                _loss = self._criterion(logits, labels, mask)
+                #_loss = self._criterion(logits, labels, mask)
                 total_val_loss += loss.item()
                 all_logits.extend(torch.masked_select(logits, mask).cpu().numpy())
                 all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
-                all_losses.extend(torch.masked_select(_loss, mask).cpu().numpy())
+                all_losses.extend(torch.masked_select(loss, mask).cpu().numpy())
         all_labels = np.array(all_labels)
         all_logits = np.array(all_logits)
         all_losses = np.array(all_losses)
@@ -104,9 +158,8 @@ class EPTrainer:
             epochs = tqdm(range(self.epochs), desc="Epochs")
             for epoch in epochs:
                 epoch+=1
-                self.train_epoch(epoch)
+                self.train_epoch()
                 score = self.validate(epoch)
-                #print(f"Epoch {epoch} score: {score}")
                 self.log_metrics({'Misc/LR': self.scheduler.get_last_lr()[0]}, epoch)
                 if score > self.best_metric:
                     self.best_metric = score
@@ -180,21 +233,43 @@ class Trainer:
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.val_metrics = []
 
-    def run_epoch(self, epoch):
+    def train_epoch(self):
         self.model.train()
         total_loss = 0
-        loop = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.epochs}")
+        loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
         for embeds, labels, mask in loop:
             embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-            logits = self.model(embeds)
+            logits = self.model(embeds, mask=mask)
             loss = self.criterion(logits, labels, mask=mask)
-            self.optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.item()
-            self.log_metrics({'Loss/Training': loss.item(),'GradNorm': grad_norm.item()}, self.total_steps)
+            self.log_metrics({'Loss/Training': loss.item(),'Misc/GradNorm': grad_norm.item()}, self.total_steps)
+            self.total_steps += 1
+            loop.set_postfix(loss=loss.item())
+        return total_loss / len(self.train_loader)
+
+    def test_epoch(self):
+        self.model.train()
+        total_loss = 0
+        loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
+
+        for embeds, labels, mask in loop:
+            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+            logits = self.model(embeds, mask=mask)
+            loss = self.criterion(logits, labels, mask=mask)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
+            self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            total_loss += loss.item()
+            self.log_metrics({'Loss/Training': loss.item(),'Misc/GradNorm': grad_norm.item()}, self.total_steps)
             self.total_steps += 1
             loop.set_postfix(loss=loss.item())
         return total_loss / len(self.train_loader)
@@ -203,7 +278,7 @@ class Trainer:
         try:
             for epoch in range(self.epochs):
                 epoch+=1
-                self.run_epoch(epoch)
+                self.train_epoch()
                 score = self.validate(epoch)
                 print(f"Epoch {epoch} score: {score}")
                 self.log_metrics({'LR': self.scheduler.get_last_lr()[0]}, epoch)

@@ -23,7 +23,7 @@ class ConvNeXt1DBlock(nn.Module):
 
         self.dwconv = nn.Conv1d(dim,dim,
             kernel_size=kernel_size,
-            padding=kernel_size // 2,
+            padding=dilation*(kernel_size//2),
             groups=dim,
             dilation=dilation
         )
@@ -36,7 +36,8 @@ class ConvNeXt1DBlock(nn.Module):
             nn.Dropout(dropout)
         ])
 
-    def forward(self, x):  # (B, C, L)
+    def forward(self, x, mask=None):  # (B, C, L)
+        x = x * mask if mask is not None else x
         residual = x
         x = self.dwconv(x)
         x = self.norm(x)
@@ -52,21 +53,28 @@ class Conv1dInvBottleNeck(nn.Module):
         activation_fn = nn.ReLU if activation == 'relu' else nn.GELU
         norm_fn = nn.BatchNorm1d if batch_norm else ConvLayerNorm
 
-        self.block = nn.Sequential(
+        self.expand = nn.Sequential(
             nn.Conv1d(dim, hidden_dim, kernel_size=1),
             norm_fn(hidden_dim),
             activation_fn(),
-
+        )
+        self.dw = nn.Sequential(
             nn.Conv1d(hidden_dim, hidden_dim, kernel_size=kernel_size, dilation=dilation, padding=dilation*(kernel_size//2), groups=hidden_dim),
             norm_fn(hidden_dim),
             activation_fn(),
-
+        )
+        self.reduce = nn.Sequential(
             nn.Conv1d(hidden_dim, dim, kernel_size=1),
             norm_fn(dim),
             nn.Dropout(dropout)
         )
 
-    def forward(self, x):  # (B, C, L)
-        return x + self.block(x)
+    def forward(self, x, mask=None):  # (B, C, L)
+        res = x
+        x = self.expand(x)
+        x = x * mask if mask is not None else x
+        x = self.dw(x)
+        x = self.reduce(x)
+        return res + x
 
 

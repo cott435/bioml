@@ -122,70 +122,43 @@ def pad_collate_fn(batch):
     return x_padded, y_padded, mask
 
 
-class ChunkedCollate:
-    def __init__(self, max_len=1000, overlap=200):
-        """
-        max_len: The hard limit for sequence length.
-        overlap: How many tokens of overlap to keep between chunks.
-                 Should be > Receptive Field of your model.
-        """
-        self.max_len = max_len
-        self.overlap = overlap
+def bucket_collate_fn(batch, rel_thresh=0.15):
+    """
+    sort greedily within given percent
+    """
+    sorted_batch = sorted(batch, key=lambda x: len(x[0]))
+    lengths = torch.tensor([x.shape[0] for x, _ in sorted_batch], dtype=torch.long)
 
-    def __call__(self, batch):
-        """
-        batch: List of (x, y) tuples
-        Returns: x_padded, y_padded, mask
-        """
-        chunked_xs = []
-        chunked_ys = []
+    sub_batches = []
+    i = 0
+    while i < len(lengths):
+        current_len = lengths[i]
+        group_items = []
 
-        # 1. Iterate through original batch and split long sequences
-        for x, y in batch:
-            seq_len = x.shape[0]
+        # Add sequences that are within threshold of current max
+        while i < len(lengths) and lengths[i] <= current_len * (1 + rel_thresh):
+            x, y = sorted_batch[i]
+            group_items.append((x, y))
+            i += 1
 
-            # Case A: Sequence fits within max_len
-            if seq_len <= self.max_len:
-                chunked_xs.append(x)
-                chunked_ys.append(y)
+        if not group_items:
+            break
 
-            # Case B: Sequence is too long -> Chunk it
-            else:
-                stride = self.max_len - self.overlap
-                start = 0
-                while start < seq_len:
-                    end = min(start + self.max_len, seq_len)
+        xs, ys = zip(*group_items)
+        x_padded = pad_sequence(xs, batch_first=True, padding_value=0.0)
+        y_padded = pad_sequence(ys, batch_first=True, padding_value=0.0)  # adjust value if needed
 
-                    # Extract slice
-                    x_chunk = x[start:end]
-                    y_chunk = y[start:end]
+        lengths_tensor = torch.tensor([x.shape[0] for x in xs], dtype=torch.long)
+        max_len = x_padded.shape[1]
+        mask = (
+                torch.arange(max_len, device=x_padded.device)[None, :]
+                < lengths_tensor[:, None]
+        )
 
-                    chunked_xs.append(x_chunk)
-                    chunked_ys.append(y_chunk)
+        sub_batches.append((x_padded, y_padded, mask))
 
-                    # Check if we are done
-                    if end == seq_len:
-                        break
+    return sub_batches
 
-                    # Move to next start point
-                    start += stride
-
-        # 2. Standard Padding Logic (now applied to the chunked list)
-        # Sort by length for efficiency (optional, helps packed_sequence but unrelated here)
-        # We just pad normally.
-        lengths = torch.tensor([x.shape[0] for x in chunked_xs], dtype=torch.long)
-
-        x_padded = pad_sequence(chunked_xs, batch_first=True)
-        y_padded = pad_sequence(chunked_ys, batch_first=True)
-
-        # 3. Create Mask
-        # (B_new, max_len)
-        mask = torch.arange(
-            x_padded.size(1),
-            device=lengths.device
-        )[None, :] < lengths[:, None]
-
-        return x_padded, y_padded, mask
 
 import time
 from contextlib import contextmanager

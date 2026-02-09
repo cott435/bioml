@@ -23,11 +23,14 @@ class BinaryFocalLoss(nn.Module):
         if self.alpha is not None:
             alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss
-        if mask is not None:
-            loss = loss * mask
+        loss = loss * mask if mask is not None else loss
 
         if self.reduction == 'mean':
             return loss.mean() if mask is None else loss.sum() / mask.sum()
-        elif self.reduction == 'sum':
-            return loss.sum() if mask is None else torch.mean(loss.sum(-1) / mask.sum(-1))
+        elif self.reduction == 'targets':
+            return loss.sum() if mask is None else torch.mean(loss.sum(-1) / targets.sum(-1))
         return loss
+
+
+
+

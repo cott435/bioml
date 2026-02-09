@@ -10,12 +10,13 @@ class Conv1dStack(nn.Module):
     def __init__(self, in_dim, out_dim=None, hidden_dim=None, layers=1, expansion_ratio=4, kernel_size=3,
                  activation='relu', dropout=0.1, batch_norm=True, final_bias=True, block_type='Conv1dInvBottleNeck', out_bias=None):
         super().__init__()
-        assert block_type in blocks
+        if isinstance(block_type, str):
+            assert block_type in blocks
         self.inp_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1) if hidden_dim else nn.Identity()
         hidden_dim = hidden_dim or in_dim
-        block = blocks[block_type]
+        block = blocks[block_type] if isinstance(block_type, str) else block_type
         dilations = [2 ** i for i in range(layers)]
-        self.stack = nn.Sequential(*[
+        self.stack = nn.ModuleList([
             block(hidden_dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilation,
                                 dropout=dropout, batch_norm=batch_norm, activation=activation)
             for dilation in dilations
@@ -26,9 +27,10 @@ class Conv1dStack(nn.Module):
             with torch.no_grad():
                 self.out_proj.bias.fill_(out_bias)
 
-    def forward(self, x):
-        x = self.inp_proj(x)
-        x = self.stack(x)
+    def forward(self, x, mask=None):
+        x = self.inp_proj(x) * mask
+        for layer in self.stack:
+            x = layer(x, mask=mask)
         x = self.norm(x)
         return self.out_proj(x)
 
@@ -39,15 +41,16 @@ class SequenceActiveSiteHead(nn.Module):
                  dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, inp_norm=True, out_bias=0):
         super().__init__()
         hidden_dim = hidden_dim or in_dim
-        self.inp_norm = nn.LayerNorm(in_dim) if inp_norm else nn.Identity()
+        self.inp_norm = nn.LayerNorm(in_dim, eps=1e-3) if inp_norm else nn.Identity()
         self.stack = Conv1dStack(in_dim, hidden_dim=hidden_dim, out_dim=out_dim, dropout=dropout,
                                  activation=activation, batch_norm=batch_norm, layers=layers,
                                  block_type=block_type, kernel_size=kernel_size, out_bias=out_bias)
 
 
-    def forward(self, embeds, sigmoid=False):
+    def forward(self, embeds, mask=None, sigmoid=False):
         x = self.inp_norm(embeds)
-        x = self.stack(x.transpose(1, 2)).transpose(1, 2).squeeze(-1)
+        mask = mask.unsqueeze(1) if mask is not None else None
+        x = self.stack(x.transpose(1, 2), mask=mask).transpose(1, 2).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
 
 
