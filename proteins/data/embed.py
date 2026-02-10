@@ -191,10 +191,11 @@ class ESMCBatchEmbedder(ESMCEmbedder):
 
 class ESMCForgeEmbedder(ESMCEmbedder):
 
-    def __init__(self, model_name='esmc_300m', token=None, save_dir=None, max_seq_len=2000, seq_overlap=250):
+    def __init__(self, model_name='esmc_300m', token=None, save_dir=None, max_seq_len=2000, seq_overlap=250, hidden=False):
         self.token = get_token(token)
         super().__init__(model_name=model_name, save_dir=save_dir, max_seq_len=max_seq_len, seq_overlap=seq_overlap)
         self.repr_layers = [l + 1 for l in self.repr_layers]
+        self.hidden = hidden
 
     def _set_model(self, model_name):
         model_name = model_name + '-2024-12' if '-2024-12' not in model_name else model_name
@@ -209,8 +210,10 @@ class ESMCForgeEmbedder(ESMCEmbedder):
             id_, sequence = item
             output = self.embed_sequence(sequence)  # API call
             emb = output.embeddings[0, 1:-1].to(torch.float32).cpu().numpy()
-            # hidden_states = output.hidden_states[:, 0, 1:-1].to(torch.float32).cpu().numpy()
-            # selected_hidden_states = {layer: hidden_states[layer] for layer in self.repr_layers}
+            if self.hidden:
+                hidden_states = output.hidden_states[1:, 0, 1:-1].to(torch.float32).cpu().numpy()
+                # selected_hidden_states = {layer: hidden_states[layer] for layer in self.repr_layers}
+                output_queue.put((f'{id_}_hidden', hidden_states))
             output_queue.put((id_, emb))
 
     def _hdf_writer(self, output_queue: mp.Queue, force=False):
