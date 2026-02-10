@@ -7,7 +7,6 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 from torch.utils.data import DataLoader
 from .losses import BinaryFocalLoss
-from proteins.plotting import save_scatter_logits_loss
 import optuna
 from collections import defaultdict
 from .schedulers import get_lr_scheduler
@@ -41,7 +40,35 @@ class EPTrainer:
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.val_metrics = defaultdict(list)
 
-    def train_epoch(self):
+    def train(self, trial=None):
+        try:
+            epochs = tqdm(range(self.epochs), desc="Epochs")
+            for epoch in epochs:
+                epoch+=1
+                self.train_epoch()
+                score = self.validate(epoch)
+                self.log_metrics({'Misc/LR': self.scheduler.get_last_lr()[0]}, epoch)
+                if score > self.best_metric:
+                    self.best_metric = score
+                    name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
+                    self.save_checkpoint(name)
+                epochs.set_postfix(val_score=score)
+                if trial is not None:
+                    trial.report(score, epoch)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+            return self.best_metric
+        except optuna.TrialPruned:
+            return self.best_metric
+        except torch.cuda.OutOfMemoryError as e:
+            print(e)
+            return self.best_metric
+        finally:
+            self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
+            if self.writer:
+                self.writer.close()
+
+    def train_epoch_(self):
         self.model.eval()
         total_loss = 0
         from torch.nn.utils.rnn import pad_sequence
@@ -89,62 +116,91 @@ class EPTrainer:
 
         d=1
 
-
-    def train_epoch_(self):
+    def train_epoch(self, accumulate=True):
         self.model.train()
         total_loss = 0
         loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
-        for sub_batches in loop:
+        for batch in loop:
             self.optimizer.zero_grad()
-            accumulated_loss = 0
-            accumulation_steps = sum([len(s[0]) for s in sub_batches])
-            for embeds, labels, mask in sub_batches:
-                embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-                logits = self.model(embeds, mask=mask)
-                loss = self.criterion(logits, labels, mask=mask)
-                loss = loss.sum(-1) / labels.sum(-1)
-                loss = loss.sum() / accumulation_steps
-                loss.backward()
-                accumulated_loss += loss.item()
-
+            loss = self._accumulate_grads(batch) if accumulate else self._get_grads(batch)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
             self.scheduler.step()
-
-            total_loss += accumulated_loss
-            self.log_metrics({'Loss/Training': accumulated_loss,'Misc/GradNorm': grad_norm.item()}, self.total_steps)
+            self.log_metrics({'Loss/Training': loss,'Misc/GradNorm': grad_norm.item()}, self.total_steps)
             self.total_steps += 1
-            loop.set_postfix(loss=accumulated_loss)
+            loop.set_postfix(loss=loss)
+            total_loss += loss
         return total_loss / len(self.train_loader)
 
-    def validate(self, epoch):
-        self.model.eval()
-        all_labels, all_logits, all_losses = [], [], []
-        total_val_loss = 0
+    def _get_grads(self, batch):
+        embeds, labels, mask = (t.to(self.device) for t in batch)
+        logits_full = self.model(embeds, mask=mask)
+        loss = self.criterion(logits_full, labels, mask=mask)
+        loss = loss.sum(-1) / labels.sum(-1)
+        loss = torch.mean(loss)
+        loss.backward()
+        return loss.item()
 
+    def _accumulate_grads(self, batch):
+        accumulated_loss = 0
+        accumulation_steps = sum([len(s[0]) for s in batch])
+        for embeds, labels, mask in batch:
+            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+            logits = self.model(embeds, mask=mask)
+            loss = self.criterion(logits, labels, mask=mask)
+            loss = loss.sum(-1) / labels.sum(-1)
+            loss = loss.sum() / accumulation_steps
+            loss.backward()
+            accumulated_loss += loss.item()
+        return accumulated_loss
+
+    def validate(self, epoch, ):
+        self.model.eval()
+        all_labels, all_logits, all_losses, batched_losses = [], [], [], []
+        self.count=0
+
+        def iter_batch(loop):
+            self.count += 1
+            print('Starting Iter')
+            for batch in loop:
+
+                if isinstance(batch, tuple):
+                    embeds, labels, mask = (b.to(self.device) for b in batch)
+                    logits = self.model(embeds, mask=mask)
+                    loss = self.criterion(logits, labels, mask)
+                    normed_loss = loss.sum(-1) / labels.sum(-1).clamp(min=1)
+                    all_logits.extend(torch.masked_select(logits, mask).cpu().numpy())
+                    all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
+                    all_losses.extend(torch.masked_select(loss, mask).cpu().numpy())
+                    batched_losses.extend(normed_loss.cpu().numpy())
+                elif isinstance(batch, list):
+                    iter_batch(batch)
+                elif not isinstance(batch, torch.Tensor):
+                    print(type(batch), batch)
+                else:
+                    print('_______________________')
+
+        print('count', self.count, 'val loader', len(self.val_loader))
+        val_loop = tqdm(self.val_loader, desc="Validation", position=1, leave=False)
         with torch.no_grad():
-            loop = tqdm(self.val_loader, desc="Validation", position=1, leave=False)
-            for embeds, labels, mask in loop:
-                embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-                logits = self.model(embeds, mask=mask)
-                loss = self.criterion(logits, labels, mask)
-                #_loss = self._criterion(logits, labels, mask)
-                total_val_loss += loss.item()
-                all_logits.extend(torch.masked_select(logits, mask).cpu().numpy())
-                all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
-                all_losses.extend(torch.masked_select(loss, mask).cpu().numpy())
+            iter_batch(val_loop)
         all_labels = np.array(all_labels)
         all_logits = np.array(all_logits)
         all_losses = np.array(all_losses)
         all_probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
-        main_score, metrics = self.compute_val_metric(all_probs, all_labels)
-        # save_scatter_logits_loss(all_logits, all_losses, all_labels, self.png_dir/f'{self.run_name}_epoch{epoch}.png')
+        try:
+            main_score, metrics = self.compute_val_metric(all_probs, all_labels)
+        except IndexError:
+            np.save(self.ckpt_dir / 'check.npy', np.stack([all_probs, all_labels]))
+            print('index error')
+
+        val_loss = sum(batched_losses) / len(batched_losses)
         self.val_metrics['labels'].append(all_labels)
         self.val_metrics['logits'].append(all_logits)
         self.val_metrics['loses'].append(all_losses)
 
         self.log_metrics(metrics, epoch, prefix='ValMetrics')
-        self.log_metrics({'Loss/Validation': total_val_loss / len(self.val_loader)}, epoch)
+        self.log_metrics({'Loss/Validation': val_loss / len(self.val_loader)}, epoch)
         return main_score
 
     def log_metrics(self, metrics, step, prefix=None):
@@ -152,34 +208,6 @@ class EPTrainer:
             for key, value in metrics.items():
                 key = f'{prefix}/{key}' if prefix else key
                 self.writer.add_scalar(key, value, step)
-
-    def train(self, trial=None):
-        try:
-            epochs = tqdm(range(self.epochs), desc="Epochs")
-            for epoch in epochs:
-                epoch+=1
-                self.train_epoch()
-                score = self.validate(epoch)
-                self.log_metrics({'Misc/LR': self.scheduler.get_last_lr()[0]}, epoch)
-                if score > self.best_metric:
-                    self.best_metric = score
-                    name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
-                    self.save_checkpoint(name)
-                epochs.set_postfix(val_score=score)
-                if trial is not None:
-                    trial.report(score, epoch)
-                    if trial.should_prune():
-                        raise optuna.TrialPruned()
-            return self.best_metric
-        except optuna.TrialPruned:
-            return self.best_metric
-        except torch.cuda.OutOfMemoryError as e:
-            print(e)
-            return self.best_metric
-        finally:
-            self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
-            if self.writer:
-                self.writer.close()
 
     def save_checkpoint(self, filename="checkpoint.pth"):
         if not self.ckpt_dir:
@@ -206,6 +234,7 @@ class EPTrainer:
         mcc = matthews_corrcoef(labels, preds)
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='binary', zero_division=0)
         return auprc, {"AUPRC": auprc, "MCC": mcc, "F1": f1}
+
 
 class Trainer:
 

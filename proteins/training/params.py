@@ -22,7 +22,7 @@ class ModelParamSpace:
     hidden_dim: IntParam = IntParam(128, 512)
     dropout: FloatParam = FloatParam(0.00, 0.3)
     activation: CategoricalParam = CategoricalParam(['relu', 'gelu'])
-    batch_norm: CategoricalParam = False
+    batch_norm: CategoricalParam | bool = False
     layers: IntParam = IntParam(2, 6)
     kernel_size: IntParam = IntParam(3, 7)
     block_type: CategoricalParam = CategoricalParam(['Conv1dInvBottleNeck', 'ConvNeXt1DBlock'])
@@ -32,7 +32,7 @@ class ModelParamSpace:
 class TrainerParamSpace:
     lr: FloatParam = FloatParam(1e-5, 5e-3, log=True)
     weight_decay: FloatParam = FloatParam(1e-4, 5e-2, log=True)
-    max_tokens: IntParam | int = 15000
+    max_tokens: IntParam | int = 25000
     loss_reduction: CategoricalParam = CategoricalParam(['mean', 'sum'])
     gamma = FloatParam(1, 4)
     scheduler_type: CategoricalParam = CategoricalParam(['cosine', 'one_cycle'])
