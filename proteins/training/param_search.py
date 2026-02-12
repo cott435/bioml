@@ -142,7 +142,6 @@ class OptunaSearch:
             device=self.device,
             ckpt_dir=self.ckpt_dir / trial_number,
             log_dir=self.logging_dir / trial_number,
-            png_dir=self.png_dir / trial_number,
             run_name=trial_number,
             epochs=self.epochs,
             **trainer_params,

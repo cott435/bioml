@@ -21,7 +21,7 @@ class ConvNeXt1DBlock(nn.Module):
         hidden_dim = dim * expansion_ratio
         activation_fn = nn.ReLU if activation == 'relu' else nn.GELU
 
-        self.dwconv = nn.Conv1d(dim,dim,
+        self.dw = nn.Conv1d(dim,dim,  # depthwise
             kernel_size=kernel_size,
             padding=dilation*(kernel_size//2),
             groups=dim,
@@ -29,7 +29,7 @@ class ConvNeXt1DBlock(nn.Module):
         )
         self.norm = nn.BatchNorm1d(dim) if batch_norm else ConvLayerNorm(dim)
 
-        self.pw_block = nn.Sequential(*[
+        self.pw = nn.Sequential(*[  # pointwise
             nn.Conv1d(dim, hidden_dim, kernel_size=1),
             activation_fn(),
             nn.Conv1d(hidden_dim, dim, kernel_size=1),
@@ -39,9 +39,9 @@ class ConvNeXt1DBlock(nn.Module):
     def forward(self, x, mask=None):  # (B, C, L)
         x = x * mask if mask is not None else x
         residual = x
-        x = self.dwconv(x)
+        x = self.dw(x)
         x = self.norm(x)
-        x = self.pw_block(x)
+        x = self.pw(x)
         return x + residual
 
 
@@ -58,7 +58,7 @@ class Conv1dInvBottleNeck(nn.Module):
             norm_fn(hidden_dim),
             activation_fn(),
         )
-        self.dw = nn.Sequential(
+        self.dw = nn.Sequential(  # depthwise
             nn.Conv1d(hidden_dim, hidden_dim, kernel_size=kernel_size, dilation=dilation, padding=dilation*(kernel_size//2), groups=hidden_dim),
             norm_fn(hidden_dim),
             activation_fn(),
@@ -78,3 +78,45 @@ class Conv1dInvBottleNeck(nn.Module):
         return res + x
 
 
+class PreActResNet1DBlock(nn.Module):
+    """
+    Pre-activation ResNet block (He et al., 2016).
+    Best for Deep Networks and Fine-tuning on Transformer embeddings.
+    Structure: BN -> ReLU -> Conv -> BN -> ReLU -> Conv
+    """
+
+    def __init__(self, dim, kernel_size=3, dilation=1, dropout=0.1):
+        super().__init__()
+        # Note: We use padding to maintain sequence length
+        padding = dilation * (kernel_size // 2)
+
+        self.bn1 = nn.BatchNorm1d(dim)
+        self.act1 = nn.GELU()  # GELU aligns better with ESM
+        self.conv1 = nn.Conv1d(dim, dim, kernel_size,
+                               padding=padding, dilation=dilation)
+
+        self.bn2 = nn.BatchNorm1d(dim)
+        self.act2 = nn.GELU()
+        self.conv2 = nn.Conv1d(dim, dim, kernel_size,
+                               padding=padding, dilation=dilation)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None):
+        residual = x
+
+        # Block 1
+        out = self.bn1(x)
+        out = self.act1(out)
+        out = self.conv1(out)
+
+        # Block 2
+        out = self.bn2(out)
+        out = self.act2(out)
+        out = self.dropout(out)
+        out = self.conv2(out)
+
+        if mask is not None:
+            out = out * mask  # Apply mask to the branch ONLY
+
+        return residual + out

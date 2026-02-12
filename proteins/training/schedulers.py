@@ -9,7 +9,6 @@ def get_lr_scheduler(
         steps_per_epoch: int,
         max_lr: float,
         min_lr: float = 1e-8,
-        warmup_epochs: int = 0
 ):
     """
     Factory function to get a learning rate scheduler.
@@ -21,10 +20,8 @@ def get_lr_scheduler(
         steps_per_epoch: Number of batches per epoch.
         max_lr: The peak learning rate (used for OneCycle and initial Cosine).
         min_lr: Minimum learning rate for cosine decay.
-        warmup_epochs: Number of epochs for linear warmup (only for 'cosine').
     """
     total_steps = num_epochs * steps_per_epoch
-    warmup_steps = warmup_epochs * steps_per_epoch
 
     # ---------------------------------------------------------
     # 1. OneCycleLR
@@ -44,9 +41,11 @@ def get_lr_scheduler(
     # ---------------------------------------------------------
     # 2. Cosine Annealing (with optional Warmup)
     # ---------------------------------------------------------
-    elif scheduler_type == 'cosine':
+    elif 'cosine' in scheduler_type:
         # Main Cosine Scheduler
         # If we have warmup, the cosine part runs for (total - warmup) steps
+        warmup_steps = 3 * steps_per_epoch if 'warmup' in scheduler_type else 0
+
         decay_steps = total_steps - warmup_steps
 
         cosine_scheduler = CosineAnnealingLR(
@@ -56,7 +55,7 @@ def get_lr_scheduler(
         )
 
         # If no warmup is requested, just return the standard cosine
-        if warmup_epochs <= 0:
+        if warmup_steps <= 0:
             return cosine_scheduler
 
         # If warmup IS requested, we chain Linear + Cosine using SequentialLR

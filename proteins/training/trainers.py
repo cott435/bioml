@@ -16,18 +16,17 @@ class EPTrainer:
     """Handles training, validation, and logging for one run (single split or fold)."""
     def __init__(self, model, train_loader: DataLoader, val_loader: DataLoader,
                  device: torch.device | str='cpu',
-                 scheduler_type: str = 'cosine', warmup=True,
-                 lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, loss_reduction='mean',
-                 ckpt_dir=None, log_dir=None, run_name=None, png_dir=None):
+                 scheduler_type: str = 'cosine',
+                 lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, gamma=2,
+                 ckpt_dir=None, log_dir=None, run_name=None):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
         self.train_loader, self.val_loader = train_loader, val_loader
 
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr,
-                                          warmup_epochs=epochs//10 if warmup else 0)
+        self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr)
 
-        self.criterion = BinaryFocalLoss(reduction='none')
+        self.criterion = BinaryFocalLoss(reduction='none', gamma=gamma)
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
 
@@ -35,8 +34,6 @@ class EPTrainer:
         self.best_metric = -float('inf')
         self.total_steps = 0
         self.ckpt_dir, self.run_name, self.epochs = ckpt_dir, run_name, epochs
-        self.png_dir = png_dir
-        self.png_dir.mkdir(exist_ok=True, parents=True)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.val_metrics = defaultdict(list)
 
@@ -63,8 +60,11 @@ class EPTrainer:
         except torch.cuda.OutOfMemoryError as e:
             print(e)
             return self.best_metric
+        except Exception as e:
+            print(e)
         finally:
             self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
+            np.savez(self.ckpt_dir / 'val_metrics.npz', **self.val_metrics)
             if self.writer:
                 self.writer.close()
 
@@ -157,14 +157,10 @@ class EPTrainer:
     def validate(self, epoch, ):
         self.model.eval()
         all_labels, all_logits, all_losses, batched_losses = [], [], [], []
-        self.count=0
 
         def iter_batch(loop):
-            self.count += 1
-            print('Starting Iter')
             for batch in loop:
-
-                if isinstance(batch, tuple):
+                if isinstance(batch[0], torch.Tensor):
                     embeds, labels, mask = (b.to(self.device) for b in batch)
                     logits = self.model(embeds, mask=mask)
                     loss = self.criterion(logits, labels, mask)
@@ -173,14 +169,10 @@ class EPTrainer:
                     all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
                     all_losses.extend(torch.masked_select(loss, mask).cpu().numpy())
                     batched_losses.extend(normed_loss.cpu().numpy())
-                elif isinstance(batch, list):
-                    iter_batch(batch)
-                elif not isinstance(batch, torch.Tensor):
-                    print(type(batch), batch)
                 else:
-                    print('_______________________')
+                    iter_batch(batch)
 
-        print('count', self.count, 'val loader', len(self.val_loader))
+
         val_loop = tqdm(self.val_loader, desc="Validation", position=1, leave=False)
         with torch.no_grad():
             iter_batch(val_loop)
@@ -188,11 +180,7 @@ class EPTrainer:
         all_logits = np.array(all_logits)
         all_losses = np.array(all_losses)
         all_probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
-        try:
-            main_score, metrics = self.compute_val_metric(all_probs, all_labels)
-        except IndexError:
-            np.save(self.ckpt_dir / 'check.npy', np.stack([all_probs, all_labels]))
-            print('index error')
+        main_score, metrics = self.compute_val_metric(all_probs, all_labels)
 
         val_loss = sum(batched_losses) / len(batched_losses)
         self.val_metrics['labels'].append(all_labels)
