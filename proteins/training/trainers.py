@@ -17,7 +17,7 @@ class EPTrainer:
     def __init__(self, model, train_loader: DataLoader, val_loader: DataLoader,
                  device: torch.device | str='cpu',
                  scheduler_type: str = 'cosine',
-                 lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, gamma=2,
+                 lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, gamma=2, alpha=0.5,
                  ckpt_dir=None, log_dir=None, run_name=None):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
@@ -26,7 +26,7 @@ class EPTrainer:
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr)
 
-        self.criterion = BinaryFocalLoss(reduction='none', gamma=gamma)
+        self.criterion = BinaryFocalLoss(reduction='none', gamma=gamma, alpha=alpha)
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
 
@@ -44,7 +44,6 @@ class EPTrainer:
                 epoch+=1
                 self.train_epoch()
                 score = self.validate(epoch)
-                self.log_metrics({'Misc/LR': self.scheduler.get_last_lr()[0]}, epoch)
                 if score > self.best_metric:
                     self.best_metric = score
                     name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
@@ -57,64 +56,14 @@ class EPTrainer:
             return self.best_metric
         except optuna.TrialPruned:
             return self.best_metric
-        except torch.cuda.OutOfMemoryError as e:
-            print(e)
-            return self.best_metric
         except Exception as e:
             print(e)
+            return self.best_metric
         finally:
             self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
             np.savez(self.ckpt_dir / 'val_metrics.npz', **self.val_metrics)
             if self.writer:
                 self.writer.close()
-
-    def train_epoch_(self):
-        self.model.eval()
-        total_loss = 0
-        from torch.nn.utils.rnn import pad_sequence
-        loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
-        sub_batches = next(iter(loop))
-
-        self.optimizer.zero_grad()
-
-        batch = [pad_sequence([z for t in tt for z in t], batch_first=True) for tt in zip(*sub_batches)]
-        embeds, labels, mask = batch
-        embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-        logits_full = self.model(embeds, mask=mask)
-        loss_full = self.criterion(logits_full, labels, mask=mask)
-        loss_normed = loss_full.sum(-1) / labels.sum(-1)
-        loss_full_mean = torch.mean(loss_normed)
-        loss_full_mean.backward()
-        grads = {
-            name: p.grad.detach().clone()
-            for name, p in self.model.named_parameters()
-            if p.grad is not None
-        }
-
-
-        self.optimizer.zero_grad()
-        accumulated_loss = 0
-        accumulated_steps = sum([len(s[0]) for s in sub_batches])
-        sub_losses = []
-        for embeds, labels, mask in sub_batches:
-            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
-            logits = self.model(embeds, mask=mask)
-            # test_logits = self.model(torch.concat([embeds, torch.zeros(1, 100, 960, device=self.device, dtype=embeds.dtype)], dim=1), mask=torch.concat([mask, torch.zeros(1, 100, device=self.device, dtype=mask.dtype)], dim=1))
-            loss_ = self.criterion(logits, labels, mask=mask)
-            loss_normed_ = loss_.sum(-1) / labels.sum(-1)
-            sub_losses.append(loss_)
-            loss = loss_normed_.sum() / accumulated_steps
-            loss.backward()
-            accumulated_loss += loss.item()
-        bucket_grads = {
-            name: p.grad.detach().clone()
-            for name, p in self.model.named_parameters()
-            if p.grad is not None
-        }
-        sub_losses = pad_sequence([s for ss in sub_losses for s in ss], batch_first=True)
-        res_grads = {name: torch.abs(bucket_grads[name] - grads[name]).sum() for name in grads}
-
-        d=1
 
     def train_epoch(self, accumulate=True):
         self.model.train()
@@ -126,7 +75,8 @@ class EPTrainer:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
             self.scheduler.step()
-            self.log_metrics({'Loss/Training': loss,'Misc/GradNorm': grad_norm.item()}, self.total_steps)
+            self.log_metrics({'Loss/Training': loss,'Misc/GradNorm': grad_norm.item(),
+                              'Misc/LR': self.scheduler.get_last_lr()[0]}, self.total_steps)
             self.total_steps += 1
             loop.set_postfix(loss=loss)
             total_loss += loss
@@ -360,3 +310,50 @@ class Trainer:
     def load_checkpoint(self, filename):
         pass
 
+    def train_epoch_(self):
+        self.model.eval()
+        total_loss = 0
+        from torch.nn.utils.rnn import pad_sequence
+        loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
+        sub_batches = next(iter(loop))
+
+        self.optimizer.zero_grad()
+
+        batch = [pad_sequence([z for t in tt for z in t], batch_first=True) for tt in zip(*sub_batches)]
+        embeds, labels, mask = batch
+        embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+        logits_full = self.model(embeds, mask=mask)
+        loss_full = self.criterion(logits_full, labels, mask=mask)
+        loss_normed = loss_full.sum(-1) / labels.sum(-1)
+        loss_full_mean = torch.mean(loss_normed)
+        loss_full_mean.backward()
+        grads = {
+            name: p.grad.detach().clone()
+            for name, p in self.model.named_parameters()
+            if p.grad is not None
+        }
+
+
+        self.optimizer.zero_grad()
+        accumulated_loss = 0
+        accumulated_steps = sum([len(s[0]) for s in sub_batches])
+        sub_losses = []
+        for embeds, labels, mask in sub_batches:
+            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+            logits = self.model(embeds, mask=mask)
+            # test_logits = self.model(torch.concat([embeds, torch.zeros(1, 100, 960, device=self.device, dtype=embeds.dtype)], dim=1), mask=torch.concat([mask, torch.zeros(1, 100, device=self.device, dtype=mask.dtype)], dim=1))
+            loss_ = self.criterion(logits, labels, mask=mask)
+            loss_normed_ = loss_.sum(-1) / labels.sum(-1)
+            sub_losses.append(loss_)
+            loss = loss_normed_.sum() / accumulated_steps
+            loss.backward()
+            accumulated_loss += loss.item()
+        bucket_grads = {
+            name: p.grad.detach().clone()
+            for name, p in self.model.named_parameters()
+            if p.grad is not None
+        }
+        sub_losses = pad_sequence([s for ss in sub_losses for s in ss], batch_first=True)
+        res_grads = {name: torch.abs(bucket_grads[name] - grads[name]).sum() for name in grads}
+
+        d=1

@@ -16,7 +16,7 @@ dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
 
 results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace()
-trainer_param_space = TrainerParamSpace()
+trainer_param_space = TrainerParamSpace(max_tokens=10000)
 op = OptunaSearch(dataset, SequenceActiveSiteHead, EPTrainer, model_param_space, trainer_param_space,
                   device=device, base_save_dir=results_dir, study_name='test2', test_size=0.2)
 op.optimize(20)

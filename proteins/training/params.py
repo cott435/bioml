@@ -32,6 +32,7 @@ class TrainerParamSpace:
     weight_decay: FloatParam = FloatParam(1e-4, 5e-2, log=True)
     max_tokens: IntParam | int = 30000
     gamma: FloatParam = FloatParam(1, 4)
+    alpha: FloatParam = FloatParam(0.25, 0.8)
     scheduler_type: CategoricalParam = CategoricalParam(['cosine', 'cosine_warmup', 'one_cycle'])
 
 
