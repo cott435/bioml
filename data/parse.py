@@ -1,4 +1,4 @@
-data_dir = "./data_files"
+data_dir = "data_files"
 
 
 def get_tdc_epitope(name='IEDB_Jespersen', file_dir=data_dir):

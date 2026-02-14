@@ -1,7 +1,7 @@
 from esm.models.esmc import ESMC
 from esm.sdk import client
-from esm.sdk.api import LogitsConfig, LogitsOutput, ESMProtein, ESMProteinError, ESMProteinTensor
-from typing import Sequence, List, Tuple
+from esm.sdk.api import LogitsConfig, LogitsOutput, ESMProtein, ESMProteinTensor
+from typing import List, Tuple
 from esm.utils.misc import stack_variable_length_tensors
 from esm.utils.sampling import _BatchedESMProteinTensor
 import torch
@@ -258,8 +258,8 @@ class ESMCForgeEmbedder(ESMCEmbedder):
 if __name__ == "__main__":
     from pathlib import Path
     import torch
-    from proteins.data.parse import *
-    from proteins.data.datasets import ESMCSingleDS, SingleSequenceDS
+    from data.parse import *
+    from data.datasets import ESMCSingleDS, SingleSequenceDS
 
     data_name = 'IEDB_Jespersen'
     model_name = 'esmc_300m'

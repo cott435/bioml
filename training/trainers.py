@@ -18,7 +18,7 @@ class EPTrainer:
                  device: torch.device | str='cpu',
                  scheduler_type: str = 'cosine',
                  lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, gamma=2, alpha=0.5,
-                 ckpt_dir=None, log_dir=None, run_name=None):
+                 ckpt_dir=None, log_dir=None, data_dir=None):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
         self.train_loader, self.val_loader = train_loader, val_loader
@@ -33,8 +33,9 @@ class EPTrainer:
         self.max_norm = max_norm if max_norm else float('inf')
         self.best_metric = -float('inf')
         self.total_steps = 0
-        self.ckpt_dir, self.run_name, self.epochs = ckpt_dir, run_name, epochs
+        self.ckpt_dir, self.data_dir, self.epochs = ckpt_dir, data_dir, epochs
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.val_metrics = defaultdict(list)
 
     def train(self, trial=None):
@@ -46,8 +47,7 @@ class EPTrainer:
                 score = self.validate(epoch)
                 if score > self.best_metric:
                     self.best_metric = score
-                    name = f'{self.run_name}_best_model.pth' if self.run_name else 'best_model.pth'
-                    self.save_checkpoint(name)
+                    self.save_checkpoint('best_model.pth')
                 epochs.set_postfix(val_score=score)
                 if trial is not None:
                     trial.report(score, epoch)
@@ -57,11 +57,11 @@ class EPTrainer:
         except optuna.TrialPruned:
             return self.best_metric
         except Exception as e:
-            print(e)
+            print(f"Training failed: {e}")
             return self.best_metric
         finally:
             self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
-            np.savez(self.ckpt_dir / 'val_metrics.npz', **self.val_metrics)
+            np.savez(self.data_dir / 'val_metrics.npz', **self.val_metrics)
             if self.writer:
                 self.writer.close()
 

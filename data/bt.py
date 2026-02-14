@@ -49,7 +49,7 @@ class ProteinAnalysis:
 
     def _load_from_id(self, pdb_id):
         print(f"Fetching PDB ID: {pdb_id}...")
-        file_path = rcsb.fetch(pdb_id, "cif", target_path=".")
+        file_path = rcsb.fetch(pdb_id, "cif", target_path="")
         pdbx_file = pdbx.BinaryCIFFile.read(file_path)
         # Get structure (model 1)
         self.atom_array = pdbx.get_structure(pdbx_file, model=1)

@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 from pandas import read_parquet
 from .parse import data_dir
 from .utils import make_sequence_fasta, cluster_fasta, parse_cd_hit_clstr
-from proteins.plotting import plot_seq_info, plt
+from plotting import plot_seq_info, plt
 import pandas as pd
 import numpy as np
 import h5py
