@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+from inspect import signature
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional
 from torch.utils.data import Subset, DataLoader
@@ -32,7 +33,7 @@ class TrainingPipeline:
         cv_splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=base_seed)
         self.train_idx, self.val_idx = next(cv_splitter.split(self.dataset.data, groups=groups))
 
-        self.out_bias = self._calculate_output_bias()
+        self.final_bias = self._calculate_output_bias()
 
     def _calculate_output_bias(self):
         training_data = self.dataset.data.iloc[self.train_idx]
@@ -51,6 +52,9 @@ class TrainingPipeline:
         train_loader_sampler = RandomTokenBatchSampler(
             train_ds, lengths[self.train_idx], max_tokens=max_tokens, drop_last=True
         )
+        train_eval_loader_sampler = SortedTokenBatchSampler(
+            train_ds, lengths[self.train_idx], max_tokens=max_tokens * 3
+        )
         val_loader_sampler = SortedTokenBatchSampler(
             val_ds, lengths[self.val_idx], max_tokens=max_tokens * 3
         )
@@ -60,12 +64,24 @@ class TrainingPipeline:
             pin_memory=torch.cuda.is_available(), num_workers=num_workers,
             prefetch_factor=prefetch_factor, persistent_workers=self.device.type == 'cuda'
         )
+        train_eval_loader = DataLoader(
+            train_ds, collate_fn=bucket_collate_fn, batch_sampler=train_eval_loader_sampler,
+            prefetch_factor=prefetch_factor, num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(), persistent_workers=self.device.type == 'cuda'
+        )
         val_loader = DataLoader(
             val_ds, collate_fn=bucket_collate_fn, batch_sampler=val_loader_sampler,
             prefetch_factor=prefetch_factor, num_workers=num_workers,
             pin_memory=torch.cuda.is_available(), persistent_workers=self.device.type == 'cuda'
         )
-        return train_loader, val_loader
+        return train_loader, train_eval_loader, val_loader
+
+    def _save_split_indices(self, data_dir: Path):
+        np.savez(
+            data_dir / "splits.npz",
+            train_idx=np.array(self.train_idx),
+            val_idx=np.array(self.val_idx),
+        )
 
     def run(
             self,
@@ -75,23 +91,27 @@ class TrainingPipeline:
             data_dir: Path,
             trial=None
     ) -> float:
+        data_dir.mkdir(parents=True, exist_ok=True)
 
         with open(data_dir / "params.json", "w") as f:
             json.dump(params, f, indent=2)
+        self._save_split_indices(data_dir)
         model_kwargs = {k: v for k, v in params.items() if k in self.model_class.__init__.__code__.co_varnames}
         trainer_kwargs = {k: v for k, v in params.items() if k not in model_kwargs}
 
-        # Handle special params
         max_tokens = trainer_kwargs.pop("max_tokens", 10000)
 
 
-        # Init components
-        train_loader, val_loader = self._get_loaders(max_tokens)
+        train_loader, train_eval_loader, val_loader = self._get_loaders(max_tokens)
         model = self.model_class(
             self.dataset.embed_dim,
             **model_kwargs,
-            out_bias=self.out_bias
+            final_bias=self.final_bias
         )
+
+        trainer_extra = {}
+        if 'train_eval_loader' in signature(self.trainer_class.__init__).parameters:
+            trainer_extra['train_eval_loader'] = train_eval_loader
 
         trainer = self.trainer_class(
             model,
@@ -102,6 +122,7 @@ class TrainingPipeline:
             log_dir=log_dir,
             data_dir=data_dir,
             epochs=self.epochs,
+            **trainer_extra,
             **trainer_kwargs,
         )
 

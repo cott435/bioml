@@ -185,30 +185,31 @@ class GoogleDriveSync:
         files = results.get('files', [])
         return files[0] if files else None
 
-    def _upload_file(self, local_path: Path, dir_map) -> str:
+    def _upload_file(self, base: Path, rel_path: Path, dir_map) -> str:
         """
         Upload a single file (overwrite if exists and differs).
         Returns a status string: 'uploaded', 'skipped', or raises on error.
         """
-        parent_id = dir_map[local_path.parent]
-        meta = self._find_existing_file_metadata(local_path.name, parent_id)
+        parent_id = dir_map[rel_path.parent]
+        meta = self._find_existing_file_metadata(rel_path.name, parent_id)
+        full_path = base / rel_path
 
         # Hash-based skip (only when remote md5Checksum exists)
         if self.hash_skip and meta and meta.get('md5Checksum'):
-            local_md5 = self._md5_file(local_path)
+            local_md5 = self._md5_file(full_path)
             if local_md5 == meta['md5Checksum']:
                 return "skipped"
 
-        media = MediaFileUpload(str(local_path), resumable=False)
+        media = MediaFileUpload(str(full_path), resumable=False)
 
         if meta:  # Overwrite
             self._get_thread_service().files().update(
                 fileId=meta['id'],
                 media_body=media
             ).execute()
-            return str(local_path)
+            return str(rel_path)
         else: # Create new
-            metadata = {'name': local_path.name, 'parents': [parent_id]}
+            metadata = {'name': rel_path.name, 'parents': [parent_id]}
             self._get_thread_service().files().create(
                 body=metadata,
                 media_body=media,
@@ -218,10 +219,18 @@ class GoogleDriveSync:
 
     def sync(self, root_folder_id: str, local_base=None) -> dict:
         """
-        Sync all tracked files to the given Google Drive folder.
+        Sync files to the given Google Drive folder.
+        If local_base is None, uses git-tracked files in the repo.
+        If local_base is provided, syncs matching files under that directory.
         Returns a summary dict.
         """
-        files = self.list_files_in_dir(local_base)
+        if local_base is None:
+            base = Path.cwd()
+            files = self.list_tracked_files()
+        else:
+            base = Path(local_base)
+            files = self.list_files_in_dir(base, rm_base=True)
+
         dir_map = self._prepare_directories(files, root_folder_id)
         total = len(files)
         if total == 0:
@@ -234,7 +243,7 @@ class GoogleDriveSync:
 
         with ThreadPoolExecutor(max_workers=self.max_concurrent) as executor:
             future_to_path = {
-                executor.submit(self._upload_file, path, dir_map): path
+                executor.submit(self._upload_file, base, path, dir_map): path
                 for path in files
             }
 
@@ -268,5 +277,5 @@ class GoogleDriveSync:
 
 if __name__ == '__main__':
     syncer = GoogleDriveSync()
-    code_folder = '1XXwUka6h3JpfZpOa6aEwbbs-Nm73qzKY'
-    syncer.sync(code_folder, local_base='proteins')
+    code_folder = '1UdkOG8plLfy__mUUSDQjNSbyU8qq6gzt'
+    syncer.sync(code_folder)

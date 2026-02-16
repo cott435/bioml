@@ -1,5 +1,6 @@
 from torch import nn as nn, Tensor
-
+import torch
+from timm.layers import DropPath
 
 class ConvLayerNorm(nn.LayerNorm):
     def forward(self, x: Tensor) -> Tensor:
@@ -14,8 +15,10 @@ class ConvNeXt1DBlock(nn.Module):
         expansion_ratio=4,
         dropout=0.1,
         activation='relu',
-        batch_norm=True,
-        dilation=1
+        batch_norm=False,
+        dilation=1,
+        drop_path=0.0,
+        layer_scale_init_value=0.0
     ):
         super().__init__()
         hidden_dim = dim * expansion_ratio
@@ -35,19 +38,23 @@ class ConvNeXt1DBlock(nn.Module):
             nn.Conv1d(hidden_dim, dim, kernel_size=1),
             nn.Dropout(dropout)
         ])
+        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim, 1)),
+                                    requires_grad=True) if layer_scale_init_value > 0 else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, mask=None):  # (B, C, L)
         x = x * mask if mask is not None else x
-        residual = x
+        res = x
         x = self.dw(x)
         x = self.norm(x)
         x = self.pw(x)
-        return x + residual
+        x = self.gamma * x
+        return res + self.drop_path(x)
 
 
 class Conv1dInvBottleNeck(nn.Module):
-    def __init__(self, dim, expansion_ratio=4, kernel_size=3, dilation=1,
-                 activation='relu', dropout=0.1, batch_norm=True):
+    def __init__(self, dim, expansion_ratio=4, kernel_size=3, dilation=1, layer_scale_init_value=0.0,
+                 activation='relu', dropout=0.1, batch_norm=False, drop_path=0.0):
         super().__init__()
         hidden_dim = dim * expansion_ratio
         activation_fn = nn.ReLU if activation == 'relu' else nn.GELU
@@ -68,6 +75,9 @@ class Conv1dInvBottleNeck(nn.Module):
             norm_fn(dim),
             nn.Dropout(dropout)
         )
+        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim, 1)),
+                                    requires_grad=True) if layer_scale_init_value > 0 else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, mask=None):  # (B, C, L)
         res = x
@@ -75,7 +85,8 @@ class Conv1dInvBottleNeck(nn.Module):
         x = x * mask if mask is not None else x
         x = self.dw(x)
         x = self.reduce(x)
-        return res + x
+        x = self.gamma * x
+        return res + self.drop_path(x)
 
 
 class PreActResNet1DBlock(nn.Module):
@@ -120,3 +131,13 @@ class PreActResNet1DBlock(nn.Module):
             out = out * mask  # Apply mask to the branch ONLY
 
         return residual + out
+
+if __name__ == "__main__":
+    x = torch.randn(100, 300, 224)
+    dp = DropPath(0.2)
+    l = nn.Linear(224, 224)
+    xx = l(x)
+    final = x+dp(xx)
+
+    d=1
+

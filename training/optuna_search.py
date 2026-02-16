@@ -83,12 +83,14 @@ class OptunaSearch:
         trial_name = f'trial_{trial.number:04d}'
         trial_ckpt_dir = self.ckpt_dir / trial_name
         trial_log_dir = self.logging_dir / trial_name
+        trial_data_dir = self.data_dir / trial_name
+        trial_data_dir.mkdir(parents=True, exist_ok=True)
 
         score = self.pipeline.run(
             params=all_params,
             ckpt_dir=trial_ckpt_dir,
             log_dir=trial_log_dir,
-            data_dir=self.data_dir,
+            data_dir=trial_data_dir,
             trial=trial
         )
 
@@ -134,4 +136,5 @@ class OptunaSearch:
     @property
     def best_value(self) -> float:
         return self.study.best_value
+
 

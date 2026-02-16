@@ -1,55 +1,72 @@
 import torch
 import torch.nn as nn
 from .blocks import Conv1dInvBottleNeck, ConvNeXt1DBlock, ConvLayerNorm
+from timm.layers import trunc_normal_
 
 blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeXt1DBlock,}
 
-
 class Conv1dStack(nn.Module):
 
-    def __init__(self, in_dim, out_dim=None, hidden_dim=None, layers=1, expansion_ratio=4, kernel_size=3,
-                 activation='relu', dropout=0.1, batch_norm=True, final_bias=True, block_type='Conv1dInvBottleNeck', out_bias=None):
+    def __init__(self, dim, layers=1, expansion_ratio=4, kernel_size=3,
+                 activation='relu', dropout=0.1, batch_norm=True, block_type='Conv1dInvBottleNeck',
+                 drop_path_rate=0.0, layer_scale_init_value=0.0):
         super().__init__()
         if isinstance(block_type, str):
             assert block_type in blocks
-        self.inp_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1) if hidden_dim else nn.Identity()
-        hidden_dim = hidden_dim or in_dim
         block = blocks[block_type] if isinstance(block_type, str) else block_type
         dilations = [2 ** i for i in range(layers)]
+        dp_rate = [x.item() for x in torch.linspace(0, drop_path_rate, layers)]
+
         self.stack = nn.ModuleList([
-            block(hidden_dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilation,
-                                dropout=dropout, batch_norm=batch_norm, activation=activation)
-            for dilation in dilations
+            block(dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilations[i],
+                  dropout=dropout, batch_norm=batch_norm, activation=activation, drop_path=dp_rate[i],
+                  layer_scale_init_value=layer_scale_init_value)
+            for i in range(layers)
         ])
-        self.norm = ConvLayerNorm(hidden_dim)
-        self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1, bias=final_bias) if out_dim else nn.Identity()
-        if out_dim and out_bias:
-            with torch.no_grad():
-                self.out_proj.bias.fill_(out_bias)
+        self.norm = ConvLayerNorm(dim)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            trunc_normal_(m.weight, std=0.02)
+            nn.init.constant_(m.bias, 0)
 
     def forward(self, x, mask=None):
-        x = self.inp_proj(x) * mask
         for layer in self.stack:
             x = layer(x, mask=mask)
-        x = self.norm(x)
-        return self.out_proj(x)
+        return self.norm(x)
 
 
 class SequenceActiveSiteHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=False,
-                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, inp_norm=True, out_bias=0):
+                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, inp_norm=True, final_bias=0,
+                 drop_path_rate=0.0, expansion_ratio=4, layer_scale_init_value=0.0):
         super().__init__()
+        self.inp_norm = nn.LayerNorm(in_dim) if inp_norm else nn.Identity()
+        self.in_proj = nn.Linear(in_dim, hidden_dim, bias=inp_norm) if hidden_dim else nn.Identity()
         hidden_dim = hidden_dim or in_dim
-        self.inp_norm = nn.LayerNorm(in_dim, eps=1e-3) if inp_norm else nn.Identity()
-        self.stack = Conv1dStack(in_dim, hidden_dim=hidden_dim, out_dim=out_dim, dropout=dropout,
+        self.stack = Conv1dStack(hidden_dim, dropout=dropout,
                                  activation=activation, batch_norm=batch_norm, layers=layers,
-                                 block_type=block_type, kernel_size=kernel_size, out_bias=out_bias)
+                                 block_type=block_type, kernel_size=kernel_size,
+                                 drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio,
+                                 layer_scale_init_value=layer_scale_init_value)
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
+        self._init_weights(final_bias)
+
+    def _init_weights(self, final_bias):
+        nn.init.kaiming_normal_(self.in_proj.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.zeros_(self.in_proj.bias)
+        nn.init.normal_(self.out_proj.weight, std=0.01)
+        nn.init.constant_(self.out_proj.bias, final_bias)
+
 
     def forward(self, embeds, mask=None, sigmoid=False):
         x = self.inp_norm(embeds)
+        x = self.in_proj(x)
         mask = mask.unsqueeze(1) if mask is not None else None
         x = self.stack(x.transpose(1, 2), mask=mask).transpose(1, 2).squeeze(-1)
+        x = self.out_proj(x).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
 
 

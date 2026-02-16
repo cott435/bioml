@@ -14,14 +14,29 @@ from .schedulers import get_lr_scheduler
 
 class EPTrainer:
     """Handles training, validation, and logging for one run (single split or fold)."""
-    def __init__(self, model, train_loader: DataLoader, val_loader: DataLoader,
-                 device: torch.device | str='cpu',
-                 scheduler_type: str = 'cosine',
-                 lr=1e-4, epochs=20, max_norm=None, weight_decay=0.01, gamma=2, alpha=0.5,
-                 ckpt_dir=None, log_dir=None, data_dir=None):
+    def __init__(
+            self,
+            model,
+            train_loader: DataLoader,
+            val_loader: DataLoader,
+            train_eval_loader: DataLoader | None = None,
+            device: torch.device | str = 'cpu',
+            scheduler_type: str = 'cosine',
+            lr=1e-4,
+            epochs=20,
+            max_norm=None,
+            weight_decay=0.01,
+            gamma=2,
+            alpha=0.5,
+            jitter = 0.0,
+            ckpt_dir=None,
+            log_dir=None,
+            data_dir=None
+    ):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
         self.train_loader, self.val_loader = train_loader, val_loader
+        self.train_eval_loader = train_eval_loader or train_loader
 
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr)
@@ -33,9 +48,11 @@ class EPTrainer:
         self.max_norm = max_norm if max_norm else float('inf')
         self.best_metric = -float('inf')
         self.total_steps = 0
+        self.jitter = jitter
         self.ckpt_dir, self.data_dir, self.epochs = ckpt_dir, data_dir, epochs
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.train_metrics = defaultdict(list)
         self.val_metrics = defaultdict(list)
 
     def train(self, trial=None):
@@ -44,7 +61,8 @@ class EPTrainer:
             for epoch in epochs:
                 epoch+=1
                 self.train_epoch()
-                score = self.validate(epoch)
+                self.evaluate_epoch(self.train_eval_loader, epoch, self.train_metrics, prefix='TrainMetrics')
+                score = self.evaluate_epoch(self.val_loader, epoch, self.val_metrics, prefix='ValMetrics')
                 if score > self.best_metric:
                     self.best_metric = score
                     self.save_checkpoint('best_model.pth')
@@ -60,8 +78,11 @@ class EPTrainer:
             print(f"Training failed: {e}")
             return self.best_metric
         finally:
-            self.val_metrics = {k: np.stack(v) for k, v in self.val_metrics.items()}
-            np.savez(self.data_dir / 'val_metrics.npz', **self.val_metrics)
+            if self.data_dir:
+                train_metrics = self._stack_metrics(self.train_metrics)
+                val_metrics = self._stack_metrics(self.val_metrics)
+                np.savez(self.data_dir / 'train_metrics.npz', **train_metrics)
+                np.savez(self.data_dir / 'val_metrics.npz', **val_metrics)
             if self.writer:
                 self.writer.close()
 
@@ -84,6 +105,8 @@ class EPTrainer:
 
     def _get_grads(self, batch):
         embeds, labels, mask = (t.to(self.device) for t in batch)
+        noise = torch.randn_like(embeds) * self.jitter
+        embeds = embeds + noise
         logits_full = self.model(embeds, mask=mask)
         loss = self.criterion(logits_full, labels, mask=mask)
         loss = loss.sum(-1) / labels.sum(-1)
@@ -96,6 +119,8 @@ class EPTrainer:
         accumulation_steps = sum([len(s[0]) for s in batch])
         for embeds, labels, mask in batch:
             embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+            noise = torch.randn_like(embeds) * self.jitter
+            embeds = embeds + noise
             logits = self.model(embeds, mask=mask)
             loss = self.criterion(logits, labels, mask=mask)
             loss = loss.sum(-1) / labels.sum(-1)
@@ -104,42 +129,63 @@ class EPTrainer:
             accumulated_loss += loss.item()
         return accumulated_loss
 
-    def validate(self, epoch, ):
-        self.model.eval()
-        all_labels, all_logits, all_losses, batched_losses = [], [], [], []
+    def evaluate_epoch(self, loader, epoch, metrics_store, prefix):
+        labels, logits, losses, batch_losses = self.collect_outputs(
+            self.model, loader, self.criterion, self.device
+        )
+        probs = torch.sigmoid(torch.from_numpy(logits)).numpy()
+        main_score, metrics = self.compute_val_metric(probs, labels)
 
-        def iter_batch(loop):
-            for batch in loop:
-                if isinstance(batch[0], torch.Tensor):
-                    embeds, labels, mask = (b.to(self.device) for b in batch)
-                    logits = self.model(embeds, mask=mask)
-                    loss = self.criterion(logits, labels, mask)
-                    normed_loss = loss.sum(-1) / labels.sum(-1).clamp(min=1)
-                    all_logits.extend(torch.masked_select(logits, mask).cpu().numpy())
-                    all_labels.extend(torch.masked_select(labels, mask).cpu().numpy())
-                    all_losses.extend(torch.masked_select(loss, mask).cpu().numpy())
-                    batched_losses.extend(normed_loss.cpu().numpy())
-                else:
-                    iter_batch(batch)
+        avg_loss = float(np.mean(batch_losses)) if len(batch_losses) else float('nan')
+        metrics['Loss'] = avg_loss
+        metrics_store['labels'].append(labels)
+        metrics_store['logits'].append(logits)
+        metrics_store['losses'].append(losses)
+        metrics_store['avg_loss'].append(avg_loss)
+        metrics_store['score'].append(main_score)
 
-
-        val_loop = tqdm(self.val_loader, desc="Validation", position=1, leave=False)
-        with torch.no_grad():
-            iter_batch(val_loop)
-        all_labels = np.array(all_labels)
-        all_logits = np.array(all_logits)
-        all_losses = np.array(all_losses)
-        all_probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
-        main_score, metrics = self.compute_val_metric(all_probs, all_labels)
-
-        val_loss = sum(batched_losses) / len(batched_losses)
-        self.val_metrics['labels'].append(all_labels)
-        self.val_metrics['logits'].append(all_logits)
-        self.val_metrics['loses'].append(all_losses)
-
-        self.log_metrics(metrics, epoch, prefix='ValMetrics')
-        self.log_metrics({'Loss/Validation': val_loss / len(self.val_loader)}, epoch)
+        self.log_metrics(metrics, epoch, prefix=prefix)
         return main_score
+
+    @staticmethod
+    def collect_outputs(model, loader, criterion, device):
+        model.eval()
+        all_labels, all_logits, all_losses, batch_losses = [], [], [], []
+
+        def iter_batch(batch):
+            if isinstance(batch[0], torch.Tensor):
+                embeds, labels, mask = (b.to(device) for b in batch)
+                logits = model(embeds, mask=mask)
+                loss = criterion(logits, labels, mask)
+                normed_loss = loss.sum(-1) / labels.sum(-1).clamp(min=1)
+                all_logits.extend(torch.masked_select(logits, mask).detach().cpu().numpy())
+                all_labels.extend(torch.masked_select(labels, mask).detach().cpu().numpy())
+                all_losses.extend(torch.masked_select(loss, mask).detach().cpu().numpy())
+                batch_losses.extend(normed_loss.detach().cpu().numpy())
+            else:
+                for sub_batch in batch:
+                    iter_batch(sub_batch)
+
+        with torch.no_grad():
+            for batch in loader:
+                iter_batch(batch)
+
+        return (
+            np.array(all_labels),
+            np.array(all_logits),
+            np.array(all_losses),
+            np.array(batch_losses),
+        )
+
+    @staticmethod
+    def _stack_metrics(metrics):
+        stacked = {}
+        for key, values in metrics.items():
+            if not values:
+                stacked[key] = np.array([])
+            else:
+                stacked[key] = np.stack(values)
+        return stacked
 
     def log_metrics(self, metrics, step, prefix=None):
         if self.writer:

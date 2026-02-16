@@ -22,4 +22,6 @@ pipeline = TrainingPipeline(dataset, SequenceActiveSiteHead, EPTrainer, device=d
 op = OptunaSearch(pipeline, model_param_space, trainer_param_space, base_save_dir=results_dir, study_name='test2')
 op.optimize(20)
 
+from plotting import hist
+
 
