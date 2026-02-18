@@ -39,7 +39,7 @@ class ConvNeXt1DBlock(nn.Module):
             nn.Dropout(dropout)
         ])
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim, 1)),
-                                    requires_grad=True) if layer_scale_init_value > 0 else nn.Identity()
+                                    requires_grad=True) if layer_scale_init_value > 0 else None
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, mask=None):  # (B, C, L)
@@ -48,7 +48,8 @@ class ConvNeXt1DBlock(nn.Module):
         x = self.dw(x)
         x = self.norm(x)
         x = self.pw(x)
-        x = self.gamma * x
+        if self.gamma is not None:
+            x = self.gamma * x
         return res + self.drop_path(x)
 
 
@@ -76,7 +77,7 @@ class Conv1dInvBottleNeck(nn.Module):
             nn.Dropout(dropout)
         )
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim, 1)),
-                                    requires_grad=True) if layer_scale_init_value > 0 else nn.Identity()
+                                    requires_grad=True) if layer_scale_init_value > 0 else None
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, mask=None):  # (B, C, L)
@@ -85,7 +86,8 @@ class Conv1dInvBottleNeck(nn.Module):
         x = x * mask if mask is not None else x
         x = self.dw(x)
         x = self.reduce(x)
-        x = self.gamma * x
+        if self.gamma is not None:
+            x = self.gamma * x
         return res + self.drop_path(x)
 
 

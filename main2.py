@@ -20,5 +20,11 @@ results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace()
 trainer_param_space = TrainerParamSpace()
 
+from data.parse import get_tdc_antibody_aff, get_tdc_protein_pep, get_tdc_ppi, get_tdc_epitope_binding
+
+aff = get_tdc_antibody_aff(file_dir=base_data_dir)
+pep = get_tdc_protein_pep(file_dir=base_data_dir)
+ppi = get_tdc_ppi(file_dir=base_data_dir)
+epi = get_tdc_epitope_binding(file_dir=base_data_dir)
 
 

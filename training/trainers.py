@@ -61,12 +61,12 @@ class EPTrainer:
             for epoch in epochs:
                 epoch+=1
                 self.train_epoch()
-                self.evaluate_epoch(self.train_eval_loader, epoch, self.train_metrics, prefix='TrainMetrics')
+                train_val_score = self.evaluate_epoch(self.train_eval_loader, epoch, self.train_metrics, prefix='TrainMetrics')
                 score = self.evaluate_epoch(self.val_loader, epoch, self.val_metrics, prefix='ValMetrics')
                 if score > self.best_metric:
                     self.best_metric = score
                     self.save_checkpoint('best_model.pth')
-                epochs.set_postfix(val_score=score)
+                epochs.set_postfix(val_score=score, train_val_score=train_val_score)
                 if trial is not None:
                     trial.report(score, epoch)
                     if trial.should_prune():
@@ -96,7 +96,8 @@ class EPTrainer:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
             self.scheduler.step()
-            self.log_metrics({'Loss/Training': loss,'Misc/GradNorm': grad_norm.item(),
+            self.log_loss(loss, self.total_steps, 'Training')
+            self.log_metrics({'Misc/GradNorm': grad_norm.item(),
                               'Misc/LR': self.scheduler.get_last_lr()[0]}, self.total_steps)
             self.total_steps += 1
             loop.set_postfix(loss=loss)
@@ -123,7 +124,7 @@ class EPTrainer:
             embeds = embeds + noise
             logits = self.model(embeds, mask=mask)
             loss = self.criterion(logits, labels, mask=mask)
-            loss = loss.sum(-1) / labels.sum(-1)
+            loss = loss.sum(-1) / labels.sum(-1).clamp(min=1)
             loss = loss.sum() / accumulation_steps
             loss.backward()
             accumulated_loss += loss.item()
@@ -137,7 +138,6 @@ class EPTrainer:
         main_score, metrics = self.compute_val_metric(probs, labels)
 
         avg_loss = float(np.mean(batch_losses)) if len(batch_losses) else float('nan')
-        metrics['Loss'] = avg_loss
         metrics_store['labels'].append(labels)
         metrics_store['logits'].append(logits)
         metrics_store['losses'].append(losses)
@@ -145,6 +145,9 @@ class EPTrainer:
         metrics_store['score'].append(main_score)
 
         self.log_metrics(metrics, epoch, prefix=prefix)
+        name = 'TrainVal' if 'train' in prefix.lower() else 'Val'
+        self.log_loss(avg_loss, epoch, name)
+        self.log_hist(logits[labels==1], epoch, f'{name}/PositiveLogits')
         return main_score
 
     @staticmethod
@@ -187,11 +190,18 @@ class EPTrainer:
                 stacked[key] = np.stack(values)
         return stacked
 
+    def log_loss(self, value, step, name):
+        self.log_metrics({f'Loss/{name}': value}, step)
+
     def log_metrics(self, metrics, step, prefix=None):
         if self.writer:
             for key, value in metrics.items():
                 key = f'{prefix}/{key}' if prefix else key
                 self.writer.add_scalar(key, value, step)
+
+    def log_hist(self, data, step, name):
+        if self.writer:
+            self.writer.add_histogram(name, data, step)
 
     def save_checkpoint(self, filename="checkpoint.pth"):
         if not self.ckpt_dir:

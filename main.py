@@ -24,4 +24,3 @@ op.optimize(20)
 
 from plotting import hist
 
-

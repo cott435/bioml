@@ -259,7 +259,8 @@ if __name__ == "__main__":
     from pathlib import Path
     import torch
     from data.parse import *
-    from data.datasets import ESMCSingleDS, SingleSequenceDS
+    from data.datasets import ESMCSingleDS
+    from data import SingleSequenceDS
 
     data_name = 'IEDB_Jespersen'
     model_name = 'esmc_300m'

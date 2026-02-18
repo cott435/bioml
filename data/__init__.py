@@ -1,1 +1,2 @@
-from .datasets import SingleSequenceDS, ESMCSingleDS
+from .datasets import ESMCSingleDS
+from .pre_embed import SingleSequenceDS

@@ -74,12 +74,10 @@ class OptunaSearch:
         return params
 
     def objective(self, trial: optuna.Trial) -> float:
-        # 1. Sample Params
         m_params = self.sample_params(trial, self.model_params)
         t_params = self.sample_params(trial, self.trainer_params)
         all_params = {**m_params, **t_params}
 
-        # 2. Setup Paths
         trial_name = f'trial_{trial.number:04d}'
         trial_ckpt_dir = self.ckpt_dir / trial_name
         trial_log_dir = self.logging_dir / trial_name
