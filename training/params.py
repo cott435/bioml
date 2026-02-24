@@ -19,25 +19,31 @@ class CategoricalParam:
 
 @dataclass(frozen=True)
 class ModelParamSpace:
-    hidden_dim: IntParam = IntParam(128, 512)
-    dropout: FloatParam = FloatParam(0.1, 0.5)
-    activation: CategoricalParam = CategoricalParam(['relu', 'gelu'])
-    layers: IntParam = IntParam(3, 7)
-    kernel_size: IntParam = IntParam(3, 7)
-    expansion_ratio: IntParam = IntParam(1, 3)
-    block_type: CategoricalParam = CategoricalParam(['Conv1dInvBottleNeck', 'ConvNeXt1DBlock'])
+    dropout: float | FloatParam = FloatParam(0.1, 0.5)
+    token_dropout: FloatParam = FloatParam(0.05, 0.15)
+    feature_dropout: FloatParam = FloatParam(0.05, 0.4)
+    feature_dropout_first: CategoricalParam = CategoricalParam([True, False])
+
+    hidden_dim: int | IntParam = IntParam(64, 256)
+    activation: str | CategoricalParam = CategoricalParam(['relu', 'gelu'])
+    layers: IntParam | int = IntParam(3, 7)
+    kernel_size: IntParam | int = IntParam(3, 7)
+    expansion_ratio: IntParam | int = IntParam(1, 3)
+    block_type: str | CategoricalParam = CategoricalParam(['Conv1dInvBottleNeck', 'ConvNeXt1DBlock'])
     layer_scale_init_value: CategoricalParam = CategoricalParam([0.0, 1e-6, 1e-3])
-    drop_path_rate: FloatParam = FloatParam(0.1, 0.5)
+    drop_path_rate: float | FloatParam = FloatParam(0.1, 0.5)
+    #inp_norm: CategoricalParam = CategoricalParam(['ln', 'fn', 'bn'])
 
 @dataclass(frozen=True)
 class TrainerParamSpace:
     lr: FloatParam = FloatParam(1e-6, 1e-2, log=True)
-    weight_decay: FloatParam = FloatParam(1e-4, 5e-2, log=True)
+    weight_decay: FloatParam = FloatParam(1e-2, 0.1, log=True)
     max_tokens: IntParam | int = 30000
-    gamma: FloatParam = FloatParam(1, 4)
-    alpha: FloatParam = FloatParam(0.25, 0.8)
-    scheduler_type: CategoricalParam = CategoricalParam(['cosine', 'cosine_warmup', 'one_cycle'])
+    gamma: float | FloatParam = FloatParam(1, 4)
+    alpha: float | FloatParam = FloatParam(0.25, 0.75)
+    lr_restarts: CategoricalParam = CategoricalParam([True, False])
     jitter: FloatParam = FloatParam(0, 0.01)
+    max_norm: FloatParam = FloatParam(0.5, 5)
 
 """
 --- detelte all multi stuff so it starts from scratch

@@ -39,7 +39,7 @@ def apply_mask(x, mask):
     x, mask = x.reshape(-1), mask.reshape(-1)
     return x[mask]
 
-def hists(xs, bin=100, name=None, mask=None):
+def hists(xs, bin=100, name=None, mask=None, tails=False):
     if not isinstance(xs, list):
         xs = [xs]
     size = len(xs) * 4
@@ -54,9 +54,10 @@ def hists(xs, bin=100, name=None, mask=None):
         else:
             x = np.array(x)
         x = x.flatten()
-        q1, q3 = np.percentile(x, [1, 99])
         ax.hist(x, bins=bin)
-        ax.set_xlim(q1, q3)
+        if not tails:
+            q1, q3 = np.percentile(x, [1, 99])
+            ax.set_xlim(q1, q3)
     fig.tight_layout()
     if name:
         fig.savefig(name)

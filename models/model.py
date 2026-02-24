@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from .blocks import Conv1dInvBottleNeck, ConvNeXt1DBlock, ConvLayerNorm
 from timm.layers import trunc_normal_
+from .norm import MaskedInstanceNorm1d
 
 blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeXt1DBlock,}
 
@@ -14,7 +15,7 @@ class Conv1dStack(nn.Module):
         if isinstance(block_type, str):
             assert block_type in blocks
         block = blocks[block_type] if isinstance(block_type, str) else block_type
-        dilations = [2 ** i for i in range(layers)]
+        dilations = [2 ** (i % 5) for i in range(layers)]  # restarts after 16
         dp_rate = [x.item() for x in torch.linspace(0, drop_path_rate, layers)]
 
         self.stack = nn.ModuleList([
@@ -29,7 +30,8 @@ class Conv1dStack(nn.Module):
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear)):
             trunc_normal_(m.weight, std=0.02)
-            nn.init.constant_(m.bias, 0)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x, mask=None):
         for layer in self.stack:
@@ -41,10 +43,11 @@ class SequenceActiveSiteHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=False,
                  dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, inp_norm=True, final_bias=0,
-                 drop_path_rate=0.0, expansion_ratio=4, layer_scale_init_value=0.0):
+                 drop_path_rate=0.0, expansion_ratio=4, layer_scale_init_value=0.0, feature_dropout=None,
+                 feature_dropout_first=True, token_dropout=None):
         super().__init__()
-        self.inp_norm = nn.LayerNorm(in_dim) if inp_norm else nn.Identity()
-        self.in_proj = nn.Linear(in_dim, hidden_dim, bias=inp_norm) if hidden_dim else nn.Identity()
+        self.inp_norm = MaskedInstanceNorm1d(in_dim)
+        self.in_proj = nn.Linear(in_dim, hidden_dim) if hidden_dim else nn.Identity()
         hidden_dim = hidden_dim or in_dim
         self.stack = Conv1dStack(hidden_dim, dropout=dropout,
                                  activation=activation, batch_norm=batch_norm, layers=layers,
@@ -52,20 +55,31 @@ class SequenceActiveSiteHead(nn.Module):
                                  drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio,
                                  layer_scale_init_value=layer_scale_init_value)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
+        self.feature_dropout_first = feature_dropout_first
+        self.feature_dropout = nn.Dropout1d(feature_dropout) if feature_dropout else nn.Identity()
+        self.token_dropout = nn.Dropout1d(token_dropout) if token_dropout else nn.Identity()
         self._init_weights(final_bias)
 
     def _init_weights(self, final_bias):
         nn.init.kaiming_normal_(self.in_proj.weight, mode='fan_in', nonlinearity='linear')
-        nn.init.zeros_(self.in_proj.bias)
+        if self.in_proj.bias is not None:
+            nn.init.zeros_(self.in_proj.bias)
         nn.init.normal_(self.out_proj.weight, std=0.01)
         nn.init.constant_(self.out_proj.bias, final_bias)
 
 
     def forward(self, embeds, mask=None, sigmoid=False):
-        x = self.inp_norm(embeds)
+        x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2)
+        x = self.token_dropout(x)
+        if self.feature_dropout_first:
+            x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
         x = self.in_proj(x)
+        if not self.feature_dropout_first:
+            x = self.feature_dropout(x.transpose(1, 2))
+        else:
+            x = x.transpose(1, 2)
         mask = mask.unsqueeze(1) if mask is not None else None
-        x = self.stack(x.transpose(1, 2), mask=mask).transpose(1, 2).squeeze(-1)
+        x = self.stack(x, mask=mask).transpose(1, 2).squeeze(-1)
         x = self.out_proj(x).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
 
@@ -79,7 +93,7 @@ class SequenceInteractionHead(nn.Module):
             expansion_ratio: int = 4,
             kernel_size: int = 3,
             dropout: float = 0.1,
-            output_dim: int | None = None,  # optional: project to lower dim before matmul
+            output_dim: int | None = None,
             final_norm: bool = True,
             matmul_norm: bool = True,
     ):

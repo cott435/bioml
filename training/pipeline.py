@@ -1,4 +1,5 @@
 from __future__ import annotations
+import gc
 import json
 from inspect import signature
 from pathlib import Path
@@ -20,8 +21,8 @@ class TrainingPipeline:
             trainer_class: Callable,
             device: torch.device | str = 'cpu',
             test_size: float = 0.2,
-            epochs: int = 25,
-            base_seed: int = 42
+            epochs: int = 15,
+            base_seed: int = 42,
     ):
         self.dataset = dataset
         self.model_class = model_class
@@ -46,7 +47,8 @@ class TrainingPipeline:
         val_ds = Subset(self.dataset, self.val_idx)
 
         num_workers = cpu_count() // 2 if self.device.type == 'cuda' else 0
-        prefetch_factor = 2 if self.device.type == 'cuda' else None
+        prefetch_factor = 2 if num_workers > 0 else None
+        persistent_workers =  num_workers > 0
         lengths = self.dataset.get_lengths()
 
         train_loader_sampler = RandomTokenBatchSampler(
@@ -62,17 +64,17 @@ class TrainingPipeline:
         train_loader = DataLoader(
             train_ds, collate_fn=bucket_collate_fn, batch_sampler=train_loader_sampler,
             pin_memory=torch.cuda.is_available(), num_workers=num_workers,
-            prefetch_factor=prefetch_factor, persistent_workers=self.device.type == 'cuda'
+            prefetch_factor=prefetch_factor, persistent_workers=persistent_workers
         )
         train_eval_loader = DataLoader(
             train_ds, collate_fn=bucket_collate_fn, batch_sampler=train_eval_loader_sampler,
             prefetch_factor=prefetch_factor, num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(), persistent_workers=self.device.type == 'cuda'
+            pin_memory=torch.cuda.is_available(), persistent_workers=persistent_workers
         )
         val_loader = DataLoader(
             val_ds, collate_fn=bucket_collate_fn, batch_sampler=val_loader_sampler,
             prefetch_factor=prefetch_factor, num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(), persistent_workers=self.device.type == 'cuda'
+            pin_memory=torch.cuda.is_available(), persistent_workers=persistent_workers
         )
         return train_loader, train_eval_loader, val_loader
 
@@ -82,6 +84,15 @@ class TrainingPipeline:
             train_idx=np.array(self.train_idx),
             val_idx=np.array(self.val_idx),
         )
+
+    @staticmethod
+    def _shutdown_loader_workers(loader: Optional[DataLoader]):
+        if loader is None:
+            return
+        iterator = getattr(loader, "_iterator", None)
+        if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+            iterator._shutdown_workers()
+            loader._iterator = None
 
     def run(
             self,
@@ -102,32 +113,46 @@ class TrainingPipeline:
         max_tokens = trainer_kwargs.pop("max_tokens", 10000)
 
 
-        train_loader, train_eval_loader, val_loader = self._get_loaders(max_tokens)
-        model = self.model_class(
-            self.dataset.embed_dim,
-            **model_kwargs,
-            final_bias=self.final_bias
-        )
+        train_loader = train_eval_loader = val_loader = None
+        model = None
+        trainer = None
+        try:
+            train_loader, train_eval_loader, val_loader = self._get_loaders(max_tokens)
+            model = self.model_class(
+                self.dataset.embed_dim,
+                **model_kwargs,
+                final_bias=self.final_bias
+            )
 
-        trainer_extra = {}
-        if 'train_eval_loader' in signature(self.trainer_class.__init__).parameters:
-            trainer_extra['train_eval_loader'] = train_eval_loader
+            trainer_extra = {}
+            if 'train_eval_loader' in signature(self.trainer_class.__init__).parameters:
+                trainer_extra['train_eval_loader'] = train_eval_loader
 
-        trainer = self.trainer_class(
-            model,
-            train_loader,
-            val_loader,
-            device=self.device,
-            ckpt_dir=ckpt_dir,
-            log_dir=log_dir,
-            data_dir=data_dir,
-            epochs=self.epochs,
-            **trainer_extra,
-            **trainer_kwargs,
-        )
+            trainer = self.trainer_class(
+                model,
+                train_loader,
+                val_loader,
+                device=self.device,
+                ckpt_dir=ckpt_dir,
+                log_dir=log_dir,
+                data_dir=data_dir,
+                epochs=self.epochs,
+                **trainer_extra,
+                **trainer_kwargs,
+            )
 
-        score = trainer.train(trial)
-        return score
+            return trainer.train(trial)
+        finally:
+            self._shutdown_loader_workers(train_loader)
+            self._shutdown_loader_workers(train_eval_loader)
+            self._shutdown_loader_workers(val_loader)
+
+            del trainer, model, train_loader, train_eval_loader, val_loader
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+            gc.collect()
 
 class SinglePipeline(TrainingPipeline):
 
@@ -154,5 +179,3 @@ class SinglePipeline(TrainingPipeline):
         data_dir = self.save_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         return super().run(params, ckpt_dir, log_dir, data_dir, trial=trial)
-
-

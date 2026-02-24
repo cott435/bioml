@@ -1,3 +1,3 @@
 from .pipeline import TrainingPipeline, SinglePipeline
-from .optuna_search import OptunaSearch
+from .search import OptunaSearch, GridSearch
 from .trainers import EPTrainer

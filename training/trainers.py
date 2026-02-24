@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from .losses import BinaryFocalLoss
 import optuna
 from collections import defaultdict
-from .schedulers import get_lr_scheduler
+from .schedulers import get_cosine_scheduler
 
 
 class EPTrainer:
@@ -21,8 +21,9 @@ class EPTrainer:
             val_loader: DataLoader,
             train_eval_loader: DataLoader | None = None,
             device: torch.device | str = 'cpu',
-            scheduler_type: str = 'cosine',
+            lr_restarts = False,
             lr=1e-4,
+            warmup_len=0.1,
             epochs=20,
             max_norm=None,
             weight_decay=0.01,
@@ -39,7 +40,7 @@ class EPTrainer:
         self.train_eval_loader = train_eval_loader or train_loader
 
         self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.scheduler = get_lr_scheduler(self.optimizer, scheduler_type, epochs, len(train_loader), lr)
+        self.scheduler = get_cosine_scheduler(self.optimizer, epochs * len(train_loader), warmup_len=warmup_len, use_restarts=lr_restarts)
 
         self.criterion = BinaryFocalLoss(reduction='none', gamma=gamma, alpha=alpha)
 
@@ -83,6 +84,9 @@ class EPTrainer:
                 val_metrics = self._stack_metrics(self.val_metrics)
                 np.savez(self.data_dir / 'train_metrics.npz', **train_metrics)
                 np.savez(self.data_dir / 'val_metrics.npz', **val_metrics)
+                del train_metrics, val_metrics
+                self.train_metrics.clear()
+                self.val_metrics.clear()
             if self.writer:
                 self.writer.close()
 
@@ -148,6 +152,8 @@ class EPTrainer:
         name = 'TrainVal' if 'train' in prefix.lower() else 'Val'
         self.log_loss(avg_loss, epoch, name)
         self.log_hist(logits[labels==1], epoch, f'{name}/PositiveLogits')
+        self.log_hist(logits[labels == 0], epoch, f'{name}/NegativeLogits')
+        del labels, logits, losses, batch_losses, probs
         return main_score
 
     @staticmethod
@@ -187,7 +193,10 @@ class EPTrainer:
             if not values:
                 stacked[key] = np.array([])
             else:
-                stacked[key] = np.stack(values)
+                try:
+                    stacked[key] = np.stack(values)
+                except ValueError:
+                    stacked[key] = np.array(values, dtype=object)
         return stacked
 
     def log_loss(self, value, step, name):
