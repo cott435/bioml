@@ -102,7 +102,9 @@ class EPTrainer:
             self.scheduler.step()
             self.log_loss(loss, self.total_steps, 'Training')
             self.log_metrics({'Misc/GradNorm': grad_norm.item(),
-                              'Misc/LR': self.scheduler.get_last_lr()[0]}, self.total_steps)
+                              'Misc/LR': self.scheduler.get_last_lr()[0],
+                              'FinalBias': self.model.out_proj.bias,
+                              'Gamma': torch.cat([layer.gamma for layer in self.model.stack.stack]).mean}, self.total_steps)
             self.total_steps += 1
             loop.set_postfix(loss=loss)
             total_loss += loss
@@ -114,7 +116,7 @@ class EPTrainer:
         embeds = embeds + noise
         logits_full = self.model(embeds, mask=mask)
         loss = self.criterion(logits_full, labels, mask=mask)
-        loss = loss.sum(-1) / labels.sum(-1)
+        loss = loss.sum(-1) / labels.sum()
         loss = torch.mean(loss)
         loss.backward()
         return loss.item()
@@ -122,13 +124,14 @@ class EPTrainer:
     def _accumulate_grads(self, batch):
         accumulated_loss = 0
         accumulation_steps = sum([len(s[0]) for s in batch])
+        #total_positive = torch.concat([b[1].sum(-1) for b in batch]).sum()
         for embeds, labels, mask in batch:
             embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
             noise = torch.randn_like(embeds) * self.jitter
             embeds = embeds + noise
             logits = self.model(embeds, mask=mask)
             loss = self.criterion(logits, labels, mask=mask)
-            loss = loss.sum(-1) / labels.sum(-1).clamp(min=1)
+            loss = loss.sum(-1) / labels.sum(-1)
             loss = loss.sum() / accumulation_steps
             loss.backward()
             accumulated_loss += loss.item()

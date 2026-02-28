@@ -71,6 +71,11 @@ class Tester:
         score, metrics = EPTrainer.compute_val_metric(probs, labels)
         avg_loss = float(np.mean(batch_losses)) if len(batch_losses) else float('nan')
         metrics['Loss'] = avg_loss
+        """
+        from plotting import hists
+        hists([layer.gamma for layer in model.stack.stack])
+        """
+
         return {
             'labels': labels,
             'logits': logits,
@@ -161,6 +166,45 @@ class Tester:
             lengths.append(len(dataset[i][0]))
         return np.array(lengths)
 
+
+class MetricsLoader:
+    @staticmethod
+    def _data_dir(run_dir: Path, trial_name: str | None = None) -> Path:
+        data_dir = run_dir / "data"
+        if trial_name:
+            data_dir = data_dir / trial_name
+        return data_dir
+
+    @staticmethod
+    def list_trials(run_dir: Path) -> list[str]:
+        data_dir = run_dir / "data"
+        if not data_dir.exists():
+            return []
+        trials = [p.name for p in data_dir.iterdir() if p.is_dir()]
+        trials = [t for t in trials if t.startswith("trial_")]
+        return sorted(trials)
+
+    @staticmethod
+    def load_metrics(path: Path):
+        data = np.load(path)
+        return {key: data[key] for key in data.files}
+
+    @staticmethod
+    def load_split(run_dir: Path, split: str, trial_name: str | None = None):
+        data_dir = MetricsLoader._data_dir(run_dir, trial_name)
+        path = data_dir / f"{split}_metrics.npz"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing metrics file at {path}")
+        return MetricsLoader.load_metrics(path)
+
+    @staticmethod
+    def load_run(run_dir: Path, split: str, trial_names: list[str] | None = None):
+        if trial_names is None:
+            trial_names = MetricsLoader.list_trials(run_dir)
+        if not trial_names:
+            return [MetricsLoader.load_split(run_dir, split)], None
+        metrics = [MetricsLoader.load_split(run_dir, split, t) for t in trial_names]
+        return metrics, trial_names
 
 
 

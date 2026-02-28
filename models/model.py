@@ -9,8 +9,8 @@ blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeX
 class Conv1dStack(nn.Module):
 
     def __init__(self, dim, layers=1, expansion_ratio=4, kernel_size=3,
-                 activation='relu', dropout=0.1, batch_norm=True, block_type='Conv1dInvBottleNeck',
-                 drop_path_rate=0.0, layer_scale_init_value=0.0):
+                 activation='relu', dropout=0.1, batch_norm=False, block_type='Conv1dInvBottleNeck',
+                 drop_path_rate=0.0, layer_scale_init_value=0.0, final_norm=True):
         super().__init__()
         if isinstance(block_type, str):
             assert block_type in blocks
@@ -24,7 +24,7 @@ class Conv1dStack(nn.Module):
                   layer_scale_init_value=layer_scale_init_value)
             for i in range(layers)
         ])
-        self.norm = ConvLayerNorm(dim)
+        self.norm = ConvLayerNorm(dim) if final_norm else nn.Identity()
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -42,7 +42,7 @@ class Conv1dStack(nn.Module):
 class SequenceActiveSiteHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=False,
-                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, inp_norm=True, final_bias=0,
+                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, final_bias=0,
                  drop_path_rate=0.0, expansion_ratio=4, layer_scale_init_value=0.0, feature_dropout=None,
                  feature_dropout_first=True, token_dropout=None):
         super().__init__()
