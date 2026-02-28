@@ -6,6 +6,18 @@ class ConvLayerNorm(nn.LayerNorm):
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x.transpose(1, 2)).transpose(1, 2)
 
+class GRN(nn.Module):
+    """ GRN (Global Response Normalization) layer
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(1, dim, 1))
+        self.beta = nn.Parameter(torch.zeros(1, dim, 1))
+
+    def forward(self, x):
+        Gx = torch.norm(x, p=2, dim=-1, keepdim=True)
+        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
+        return self.gamma * (x * Nx) + self.beta + x
 
 class ConvNeXt1DBlock(nn.Module):
     def __init__(
@@ -18,7 +30,6 @@ class ConvNeXt1DBlock(nn.Module):
         batch_norm=False,
         dilation=1,
         drop_path=0.0,
-        layer_scale_init_value=0.0
     ):
         super().__init__()
         hidden_dim = dim * expansion_ratio
@@ -35,11 +46,10 @@ class ConvNeXt1DBlock(nn.Module):
         self.pw = nn.Sequential(*[  # pointwise
             nn.Conv1d(dim, hidden_dim, kernel_size=1),
             activation_fn(),
+            GRN(hidden_dim),
             nn.Conv1d(hidden_dim, dim, kernel_size=1),
             nn.Dropout(dropout)
         ])
-        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim, 1)),
-                                    requires_grad=True) if layer_scale_init_value > 0 else None
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, mask=None):  # (B, C, L)
@@ -48,8 +58,6 @@ class ConvNeXt1DBlock(nn.Module):
         x = self.dw(x)
         x = self.norm(x)
         x = self.pw(x)
-        if self.gamma is not None:
-            x = self.gamma * x
         return res + self.drop_path(x)
 
 

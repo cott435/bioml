@@ -101,10 +101,7 @@ class EPTrainer:
             self.optimizer.step()
             self.scheduler.step()
             self.log_loss(loss, self.total_steps, 'Training')
-            self.log_metrics({'Misc/GradNorm': grad_norm.item(),
-                              'Misc/LR': self.scheduler.get_last_lr()[0],
-                              'FinalBias': self.model.out_proj.bias,
-                              'Gamma': torch.cat([layer.gamma for layer in self.model.stack.stack]).mean}, self.total_steps)
+            self.log_training_step(grad_norm.item())
             self.total_steps += 1
             loop.set_postfix(loss=loss)
             total_loss += loss
@@ -202,6 +199,17 @@ class EPTrainer:
                     stacked[key] = np.array(values, dtype=object)
         return stacked
 
+    def log_training_step(self, grad_norm):
+        items = {
+            'Misc/GradNorm': grad_norm,
+            'Misc/LR': self.scheduler.get_last_lr()[0],
+            'Model/FinalBias': self.model.out_proj.bias,
+            }
+        self.log_metrics(items, self.total_steps)
+        gammas = [layer.pw[2].gamma for layer in self.model.stack.stack]
+        if gammas[0] is not None:
+            self.log_hist(torch.stack(gammas, dim=0).mean(0), self.total_steps, 'Model/Gamma')
+
     def log_loss(self, value, step, name):
         self.log_metrics({f'Loss/{name}': value}, step)
 
@@ -213,6 +221,8 @@ class EPTrainer:
 
     def log_hist(self, data, step, name):
         if self.writer:
+            if isinstance(data, torch.Tensor):
+                data = data.detach().cpu().numpy().flatten()
             self.writer.add_histogram(name, data, step)
 
     def save_checkpoint(self, filename="checkpoint.pth"):

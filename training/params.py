@@ -30,7 +30,6 @@ class ModelParamSpace:
     kernel_size: IntParam | int = IntParam(3, 7)
     expansion_ratio: IntParam | int = IntParam(1, 3)
     block_type: str | CategoricalParam = CategoricalParam(['Conv1dInvBottleNeck', 'ConvNeXt1DBlock'])
-    layer_scale_init_value: CategoricalParam = CategoricalParam([0.0, 1e-6, 1e-3])
     drop_path_rate: float | FloatParam = FloatParam(0.1, 0.5)
     #inp_norm: CategoricalParam = CategoricalParam(['ln', 'fn', 'bn'])
 

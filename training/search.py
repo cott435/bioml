@@ -314,6 +314,7 @@ class OptunaSearch(BaseSearch):
         return params
 
     def objective(self, trial: optuna.Trial) -> float:
+        all_params={}
         try:
             m_params = self.sample_params(trial, self.model_params)
             t_params = self.sample_params(trial, self.trainer_params)

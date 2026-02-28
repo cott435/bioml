@@ -73,7 +73,7 @@ class Tester:
         metrics['Loss'] = avg_loss
         """
         from plotting import hists
-        hists([layer.gamma for layer in model.stack.stack])
+        hists([layer.gamma for layer in self.model.stack.stack])
         """
 
         return {

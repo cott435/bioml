@@ -10,7 +10,7 @@ class Conv1dStack(nn.Module):
 
     def __init__(self, dim, layers=1, expansion_ratio=4, kernel_size=3,
                  activation='relu', dropout=0.1, batch_norm=False, block_type='Conv1dInvBottleNeck',
-                 drop_path_rate=0.0, layer_scale_init_value=0.0, final_norm=True):
+                 drop_path_rate=0.0, final_norm=True):
         super().__init__()
         if isinstance(block_type, str):
             assert block_type in blocks
@@ -20,8 +20,7 @@ class Conv1dStack(nn.Module):
 
         self.stack = nn.ModuleList([
             block(dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilations[i],
-                  dropout=dropout, batch_norm=batch_norm, activation=activation, drop_path=dp_rate[i],
-                  layer_scale_init_value=layer_scale_init_value)
+                  dropout=dropout, batch_norm=batch_norm, activation=activation, drop_path=dp_rate[i])
             for i in range(layers)
         ])
         self.norm = ConvLayerNorm(dim) if final_norm else nn.Identity()
@@ -43,7 +42,7 @@ class SequenceActiveSiteHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=False,
                  dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, final_bias=0,
-                 drop_path_rate=0.0, expansion_ratio=4, layer_scale_init_value=0.0, feature_dropout=None,
+                 drop_path_rate=0.0, expansion_ratio=4, feature_dropout=None,
                  feature_dropout_first=True, token_dropout=None):
         super().__init__()
         self.inp_norm = MaskedInstanceNorm1d(in_dim)
@@ -52,8 +51,7 @@ class SequenceActiveSiteHead(nn.Module):
         self.stack = Conv1dStack(hidden_dim, dropout=dropout,
                                  activation=activation, batch_norm=batch_norm, layers=layers,
                                  block_type=block_type, kernel_size=kernel_size,
-                                 drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio,
-                                 layer_scale_init_value=layer_scale_init_value)
+                                 drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
         self.feature_dropout_first = feature_dropout_first
         self.feature_dropout = nn.Dropout1d(feature_dropout) if feature_dropout else nn.Identity()

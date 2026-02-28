@@ -20,33 +20,10 @@ trainer_param_space = TrainerParamSpace(max_tokens=30000, gamma=2, alpha=0.5)
 
 pipeline = TrainingPipeline(dataset, SequenceActiveSiteHead, EPTrainer, device=device)
 
-op = OptunaSearch(pipeline, model_param_space, trainer_param_space, base_save_dir=results_dir, study_name='test2')
+op = OptunaSearch(pipeline, model_param_space, trainer_param_space, base_save_dir=results_dir, study_name='local')
 op.optimize(20)
 
-"""
-"""
 
-"""For testing"""
-import torch
-from models import SequenceActiveSiteHead
-from training.losses import BinaryFocalLoss
-from testing.model_test import Tester
-criterion = BinaryFocalLoss(reduction="none")
-data_name = "IEDB_Jespersen"
-model_name = "esmc_300m"
-run_dir = Path.cwd() / "experiments" / "rm_norm1"
-trial_name = 'trial_0003'
-tester = Tester(
-    SequenceActiveSiteHead,
-    dataset,
-    run_dir,
-    criterion,
-    trial_name=trial_name,
-    device=device,
-)
-
-train_results = tester.evaluate_split("train")
-val_results = tester.evaluate_split("val")
 
 
 

@@ -17,7 +17,7 @@ dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
 criterion = BinaryFocalLoss(reduction="none")
 data_name = "IEDB_Jespersen"
 model_name = "esmc_300m"
-run_dir = Path.cwd() / "experiments" / "rm_norm2"
+run_dir = Path.cwd() / "experiments" / "conv_v2"
 trial_name = 'trial_0003'
 tester = Tester(
     SequenceActiveSiteHead,
@@ -31,4 +31,5 @@ tester = Tester(
 train_results = tester.evaluate_split("train")
 val_results = tester.evaluate_split("val")
 
-
+from plotting import hists
+hists([x, res])
