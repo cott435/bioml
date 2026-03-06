@@ -11,12 +11,12 @@ class GRN(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
-        self.gamma = nn.Parameter(torch.zeros(1, dim, 1))
-        self.beta = nn.Parameter(torch.zeros(1, dim, 1))
+        self.gamma = nn.Parameter(torch.zeros(1, 1, dim))
+        self.beta = nn.Parameter(torch.zeros(1, 1, dim))
 
     def forward(self, x):
-        Gx = torch.norm(x, p=2, dim=-1, keepdim=True)
-        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
+        Gx = torch.norm(x, p=2, dim=1, keepdim=True)
+        Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
         return self.gamma * (x * Nx) + self.beta + x
 
 class ConvNeXt1DBlock(nn.Module):
@@ -27,7 +27,6 @@ class ConvNeXt1DBlock(nn.Module):
         expansion_ratio=4,
         dropout=0.1,
         activation='relu',
-        batch_norm=False,
         dilation=1,
         drop_path=0.0,
     ):
@@ -41,13 +40,13 @@ class ConvNeXt1DBlock(nn.Module):
             groups=dim,
             dilation=dilation
         )
-        self.norm = nn.BatchNorm1d(dim) if batch_norm else ConvLayerNorm(dim)
+        self.norm = nn.LayerNorm(dim)
 
         self.pw = nn.Sequential(*[  # pointwise
-            nn.Conv1d(dim, hidden_dim, kernel_size=1),
+            nn.Linear(dim, hidden_dim),
             activation_fn(),
             GRN(hidden_dim),
-            nn.Conv1d(hidden_dim, dim, kernel_size=1),
+            nn.Linear(hidden_dim, dim),
             nn.Dropout(dropout)
         ])
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -55,11 +54,10 @@ class ConvNeXt1DBlock(nn.Module):
     def forward(self, x, mask=None):  # (B, C, L)
         x = x * mask if mask is not None else x
         res = x
-        x = self.dw(x)
+        x = self.dw(x.transpose(1, 2)).transpose(1, 2)
         x = self.norm(x)
         x = self.pw(x)
         return res + self.drop_path(x)
-
 
 class Conv1dInvBottleNeck(nn.Module):
     def __init__(self, dim, expansion_ratio=4, kernel_size=3, dilation=1, layer_scale_init_value=0.0,

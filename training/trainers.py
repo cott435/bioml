@@ -6,7 +6,7 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 from torch.utils.data import DataLoader
-from .losses import BinaryFocalLoss
+from .losses import DynamicBinaryFocalLoss, BinaryFocalLoss
 import optuna
 from collections import defaultdict
 from .schedulers import get_cosine_scheduler
@@ -22,27 +22,38 @@ class EPTrainer:
             train_eval_loader: DataLoader | None = None,
             device: torch.device | str = 'cpu',
             lr_restarts = False,
-            lr=1e-4,
+            backbone_lr_ratio = 0.1,
+            base_lr=1e-4,
             warmup_len=0.1,
-            epochs=20,
+            epochs=10,
             max_norm=None,
             weight_decay=0.01,
             gamma=2,
-            alpha=0.5,
+            alpha=0.25,
             jitter = 0.0,
             ckpt_dir=None,
             log_dir=None,
-            data_dir=None
+            data_dir=None,
+            loss_start_ratio = None,
+            loss_end_ratio = 0.8,
     ):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
         self.train_loader, self.val_loader = train_loader, val_loader
         self.train_eval_loader = train_eval_loader or train_loader
 
-        self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.scheduler = get_cosine_scheduler(self.optimizer, epochs * len(train_loader), warmup_len=warmup_len, use_restarts=lr_restarts)
-
-        self.criterion = BinaryFocalLoss(reduction='none', gamma=gamma, alpha=alpha)
+        self.optimizer = torch.optim.AdamW([
+                {"params": model.stack.parameters(), "lr": base_lr},
+                {"params": model.in_proj.parameters(), "lr": base_lr * backbone_lr_ratio},
+                {"params": model.out_proj.parameters(), "lr": base_lr * backbone_lr_ratio},
+            ], weight_decay=weight_decay)
+        total_steps = epochs * len(train_loader)
+        self.scheduler = get_cosine_scheduler(self.optimizer, total_steps, warmup_len=warmup_len, use_restarts=lr_restarts)
+        if loss_start_ratio:
+            self.criterion = DynamicBinaryFocalLoss(total_steps, reduction='none', start_alpha=alpha, end_alpha=alpha,
+                                                    end_gamma=gamma, start_ratio=loss_start_ratio, end_ratio=loss_end_ratio)
+        else:
+            self.criterion = BinaryFocalLoss(alpha=alpha, gamma=gamma, reduction='none')
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
 
@@ -100,6 +111,7 @@ class EPTrainer:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
             self.scheduler.step()
+            self.criterion.step()
             self.log_loss(loss, self.total_steps, 'Training')
             self.log_training_step(grad_norm.item())
             self.total_steps += 1
@@ -113,25 +125,32 @@ class EPTrainer:
         embeds = embeds + noise
         logits_full = self.model(embeds, mask=mask)
         loss = self.criterion(logits_full, labels, mask=mask)
-        loss = loss.sum(-1) / labels.sum()
-        loss = torch.mean(loss)
+        loss = loss.sum() / mask.sum()
         loss.backward()
         return loss.item()
 
     def _accumulate_grads(self, batch):
         accumulated_loss = 0
+        acc_pos, acc_neg = 0, 0
         accumulation_steps = sum([len(s[0]) for s in batch])
-        #total_positive = torch.concat([b[1].sum(-1) for b in batch]).sum()
-        for embeds, labels, mask in batch:
-            embeds, labels, mask = embeds.to(self.device), labels.to(self.device), mask.to(self.device)
+        total_valid_tokens = sum([s[2].sum().item() for s in batch])
+        for embeds, targets, mask in batch:
+            embeds, targets, mask = embeds.to(self.device), targets.to(self.device), mask.to(self.device)
             noise = torch.randn_like(embeds) * self.jitter
             embeds = embeds + noise
             logits = self.model(embeds, mask=mask)
-            loss = self.criterion(logits, labels, mask=mask)
-            loss = loss.sum(-1) / labels.sum(-1)
-            loss = loss.sum() / accumulation_steps
-            loss.backward()
-            accumulated_loss += loss.item()
+            loss = self.criterion(logits, targets, mask=mask)
+            seq_loss = loss.sum() / total_valid_tokens
+            seq_loss.backward()
+            accumulated_loss += seq_loss.item()
+
+            with torch.no_grad():
+                pos, neg = self.criterion.reduce_loss(loss.detach(), targets, mask, reduce=False)
+                acc_pos += (pos.sum() / accumulation_steps).item()
+                acc_neg += (neg.sum() / accumulation_steps).item()
+
+        self.log_loss(acc_pos, self.total_steps, 'TrainingPositive')
+        self.log_loss(acc_neg, self.total_steps, 'TrainingNegative')
         return accumulated_loss
 
     def evaluate_epoch(self, loader, epoch, metrics_store, prefix):
@@ -166,7 +185,7 @@ class EPTrainer:
                 embeds, labels, mask = (b.to(device) for b in batch)
                 logits = model(embeds, mask=mask)
                 loss = criterion(logits, labels, mask)
-                normed_loss = loss.sum(-1) / labels.sum(-1).clamp(min=1)
+                normed_loss = criterion.reduce_loss(loss, labels, mask)
                 all_logits.extend(torch.masked_select(logits, mask).detach().cpu().numpy())
                 all_labels.extend(torch.masked_select(labels, mask).detach().cpu().numpy())
                 all_losses.extend(torch.masked_select(loss, mask).detach().cpu().numpy())
@@ -206,8 +225,9 @@ class EPTrainer:
             'Model/FinalBias': self.model.out_proj.bias,
             }
         self.log_metrics(items, self.total_steps)
+        self.log_metrics(self.criterion.get_current_params(), self.total_steps, prefix='LossWeights')
         gammas = [layer.pw[2].gamma for layer in self.model.stack.stack]
-        if gammas[0] is not None:
+        if gammas[0] is not None and self.total_steps % 10 == 0:
             self.log_hist(torch.stack(gammas, dim=0).mean(0), self.total_steps, 'Model/Gamma')
 
     def log_loss(self, value, step, name):

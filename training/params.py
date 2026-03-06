@@ -20,8 +20,8 @@ class CategoricalParam:
 @dataclass(frozen=True)
 class ModelParamSpace:
     dropout: float | FloatParam = FloatParam(0.1, 0.5)
-    token_dropout: FloatParam = FloatParam(0.05, 0.15)
-    feature_dropout: FloatParam = FloatParam(0.05, 0.4)
+    token_dropout: FloatParam = FloatParam(0.00001, 0.00002)
+    feature_dropout: FloatParam = FloatParam(0.00001, 0.00002)
     feature_dropout_first: CategoricalParam = CategoricalParam([True, False])
 
     hidden_dim: int | IntParam = IntParam(64, 256)

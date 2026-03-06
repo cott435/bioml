@@ -6,10 +6,10 @@ import random
 from dataclasses import fields
 from .params import ModelParamSpace, TrainerParamSpace, FloatParam, CategoricalParam, IntParam
 from .pipeline import TrainingPipeline
-from pathlib import Path
 from typing import Any, Dict
-import json
 import torch
+from pathlib import Path
+import json
 
 
 class BaseSearch:
@@ -350,3 +350,4 @@ class OptunaSearch(BaseSearch):
     @property
     def best_value(self) -> float:
         return self.study.best_value
+

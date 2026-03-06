@@ -1,6 +1,3 @@
-
-
-
 from pathlib import Path
 from data import ESMCSingleDS
 from models import SequenceActiveSiteHead
@@ -20,57 +17,18 @@ results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace(hidden_dim=128, activation='gelu', layers=5, kernel_size=3, expansion_ratio=2, block_type='ConvNeXt1DBlock')
 trainer_param_space = TrainerParamSpace(max_tokens=30000, gamma=2, alpha=0.5)
 
-pipeline = TrainingPipeline(dataset, SequenceActiveSiteHead, EPTrainer, device=device)
+pipeline = TrainingPipeline(dataset, SequenceActiveSiteHead, EPTrainer, device=device, epochs=25)
 
-params = {'hidden_dim': 128, 'dropout': 0.25, 'activation': 'gelu', 'layers': 3, 'kernel_size': 3,
-          'expansion_ratio': 2, 'block_type': 'ConvNeXt1DBlock', 'layer_scale_init_value': 1e-6,
-          'drop_path_rate': 0.25, 'lr': 1e-3, 'weight_decay': 5e-2, 'gamma': 2, 'alpha': 0.5,
-          'lr_restarts': [True, False], 'jitter': 0.003, 'feature_dropout_first':False,
-          'feature_dropout':0.3, 'token_dropout':0.1, 'max_tokens': 30000, 'max_norm': 0.5}
+params = {'hidden_dim': 128, 'base_lr': 1e-3, 'backbone_lr_ratio': 0.1,
+          'gamma': 2, 'alpha': 0.25, 'dropout': 0.0,
+          'jitter': 0.000, 'warmup_len': 0.2, 'token_dropout':0.0,
+          'max_tokens': 60000, 'max_norm': 1, 'inp_norm': [True, False]}
 
-ss = GridSearch(pipeline, params, 'test_grid', base_save_dir=base_data_dir)
+ss = GridSearch(pipeline, params, 'single_batch_extended2', base_save_dir=results_dir)
 ss.optimize()
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-from pathlib import Path
-from models import SequenceActiveSiteHead
-import torch
-from training.search import OptunaSearch
-from training.trainers import EPTrainer
-from sklearn.model_selection import GroupKFold
-from training.params import ModelParamSpace, TrainerParamSpace
-
-
-data_name = 'HuRi'
-model_name = 'esmc_300m'
-base_data_dir = Path.cwd() / 'data' / 'data_files'
-
-#dataset = ESMCMultiDS(data_name, model_name, save_dir=base_data_dir)
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-
-results_dir = Path.cwd() / 'experiments'
-model_param_space = ModelParamSpace()
-trainer_param_space = TrainerParamSpace()
-
-from data.parse import get_tdc_antibody_aff, get_tdc_protein_pep, get_tdc_ppi, get_tdc_epitope_binding
-
-aff = get_tdc_antibody_aff(file_dir=base_data_dir)
-pep = get_tdc_protein_pep(file_dir=base_data_dir)
-ppi = get_tdc_ppi(file_dir=base_data_dir)
-epi = get_tdc_epitope_binding(file_dir=base_data_dir)
 
 
 """

@@ -9,8 +9,8 @@ blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeX
 class Conv1dStack(nn.Module):
 
     def __init__(self, dim, layers=1, expansion_ratio=4, kernel_size=3,
-                 activation='relu', dropout=0.1, batch_norm=False, block_type='Conv1dInvBottleNeck',
-                 drop_path_rate=0.0, final_norm=True):
+                 activation='relu', dropout=0.1, block_type='ConvNeXt1DBlock',
+                 drop_path_rate=0.0, final_norm=False):
         super().__init__()
         if isinstance(block_type, str):
             assert block_type in blocks
@@ -20,15 +20,16 @@ class Conv1dStack(nn.Module):
 
         self.stack = nn.ModuleList([
             block(dim, expansion_ratio=expansion_ratio, kernel_size=kernel_size, dilation=dilations[i],
-                  dropout=dropout, batch_norm=batch_norm, activation=activation, drop_path=dp_rate[i])
+                  dropout=dropout, activation=activation, drop_path=dp_rate[i])
             for i in range(layers)
         ])
-        self.norm = ConvLayerNorm(dim) if final_norm else nn.Identity()
+        self.norm = nn.LayerNorm(dim) if final_norm else nn.Identity()
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        if isinstance(m, (nn.Conv2d, nn.Linear)):
-            trunc_normal_(m.weight, std=0.02)
+        if isinstance(m, (nn.Conv2d, nn.Linear, nn.Conv1d)):
+            feats = m.in_features if hasattr(m, 'in_features') else m.in_channels
+            trunc_normal_(m.weight, std=feats**-0.5)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
@@ -40,17 +41,17 @@ class Conv1dStack(nn.Module):
 
 class SequenceActiveSiteHead(nn.Module):
 
-    def __init__(self, in_dim, out_dim=1, layers=1, hidden_dim=None, activation='relu', batch_norm=False,
-                 dropout=0.1, block_type='Conv1dInvBottleNeck', kernel_size=5, final_bias=0,
-                 drop_path_rate=0.0, expansion_ratio=4, feature_dropout=None,
-                 feature_dropout_first=True, token_dropout=None):
+    def __init__(self, in_dim, out_dim=1, layers=4, hidden_dim=None, activation='gelu',
+                 dropout=0.2, block_type='ConvNeXt1DBlock', kernel_size=3, final_bias=0,
+                 drop_path_rate=0.0, expansion_ratio=4, feature_dropout=None, inp_norm=True,
+                 feature_dropout_first=False, token_dropout=None, final_norm=False):
         super().__init__()
-        self.inp_norm = MaskedInstanceNorm1d(in_dim)
+        self.inp_norm = MaskedInstanceNorm1d(in_dim) if inp_norm else None
         self.in_proj = nn.Linear(in_dim, hidden_dim) if hidden_dim else nn.Identity()
         hidden_dim = hidden_dim or in_dim
         self.stack = Conv1dStack(hidden_dim, dropout=dropout,
-                                 activation=activation, batch_norm=batch_norm, layers=layers,
-                                 block_type=block_type, kernel_size=kernel_size,
+                                 activation=activation, layers=layers,
+                                 block_type=block_type, kernel_size=kernel_size, final_norm=final_norm,
                                  drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
         self.feature_dropout_first = feature_dropout_first
@@ -67,17 +68,15 @@ class SequenceActiveSiteHead(nn.Module):
 
 
     def forward(self, embeds, mask=None, sigmoid=False):
-        x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2)
+        x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
         x = self.token_dropout(x)
         if self.feature_dropout_first:
             x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
         x = self.in_proj(x)
         if not self.feature_dropout_first:
-            x = self.feature_dropout(x.transpose(1, 2))
-        else:
-            x = x.transpose(1, 2)
-        mask = mask.unsqueeze(1) if mask is not None else None
-        x = self.stack(x, mask=mask).transpose(1, 2).squeeze(-1)
+            x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
+        mask = mask.unsqueeze(-1) if mask is not None else None
+        x = self.stack(x, mask=mask)
         x = self.out_proj(x).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
 

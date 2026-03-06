@@ -1,7 +1,192 @@
+from sklearn.metrics import f1_score, matthews_corrcoef, average_precision_score
+import h5py
 import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+from scipy.stats import ttest_ind
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import f1_score, matthews_corrcoef, average_precision_score
+import os
+
+
+class ProteinEmbeddingAnalyzer:
+    def __init__(self, dataset, lengths=None, embedding_key='embedding', n_components=50):
+        """
+        Initialize the analyzer.
+
+        :param h5_path: Path to the H5 file containing embeddings.
+        :param ids: List of protein IDs to load.
+        :param labels: Dict of ID to label (0 for negative, 1 for positive).
+        :param lengths: Optional dict of ID to sequence length. If None, attempts to load from H5 under 'length'.
+        :param embedding_key: Key in H5 group for the embedding dataset.
+        :param n_components: Number of PCA components to compute.
+        """
+        self.dataset = dataset
+        self.df = dataset.data.copy().set_index('ID')
+        self.lengths = lengths or {}
+        self.embedding_key = embedding_key
+        self.n_components = n_components
+        self.embeddings = None
+        self.pca_model = None
+        self.pca_transformed = None
+        self._load_data()
+
+    def _load_data(self):
+        """Load embeddings, labels, and lengths from H5."""
+        embeddings_list = []
+        labels_list = []
+        lengths_list = []
+
+        for id_ in self.df.index:
+            if id_ not in self.dataset.hdf:
+                raise ValueError(f"ID {id_} not found in H5 file.")
+            group = self.dataset.hdf[id_]
+            embedding = np.array(group[:])
+            embeddings_list.append(embedding)
+
+            label = self.df.loc[id_]['Y']
+            if label is None:
+                raise ValueError(f"Label not provided for ID {id_}.")
+            full_labels = np.zeros(len(embedding))
+            full_labels[label] = 1
+            labels_list.append(full_labels)
+
+            lengths_list.append(len(embedding))
+
+        self.embeddings = embeddings_list
+        self.labels = labels_list
+        self.lengths = lengths_list
+        self.all_labels = np.concatenate(labels_list)
+
+    def compute_pca(self):
+        """Compute PCA on the embeddings."""
+        self.pca_model = PCA(n_components=self.n_components)
+        all_embeddings = np.concatenate(self.embeddings)
+        self.pca_transformed = self.pca_model.fit_transform(all_embeddings)
+
+    def plot_histogram_lengths(self, save_path=None):
+        """Plot histogram of protein lengths."""
+        plt.figure(figsize=(10, 6))
+        sns.histplot(np.array(self.lengths), bins=30, kde=True)
+        plt.title('Histogram of Protein Lengths')
+        plt.xlabel('Length')
+        plt.ylabel('Frequency')
+        if save_path:
+            plt.savefig(save_path)
+        else:
+            plt.show()
+        plt.close()
+
+    def plot_histogram_positives(self, save_path=None):
+        """Plot bar chart of number of positives and negatives."""
+        positives = np.sum(self.all_labels == 1)
+        negatives = np.sum(self.all_labels == 0)
+        plt.figure(figsize=(6, 6))
+        sns.barplot(x=['Negatives', 'Positives'], y=[negatives, positives])
+        plt.title('Number of Positives and Negatives')
+        plt.ylabel('Count')
+        if save_path:
+            plt.savefig(save_path)
+        else:
+            plt.show()
+        plt.close()
+
+    def plot_pca_scatter(self, pc_x=0, pc_y=1, save_path=None):
+        """Plot colored scatter plot for two PCA components, colored by label."""
+        if self.pca_transformed is None:
+            self.compute_pca()
+
+        plt.figure(figsize=(10, 8))
+        scatter = plt.scatter(self.pca_transformed[:, pc_x], self.pca_transformed[:, pc_y],
+                              c=self.all_labels, cmap='viridis', alpha=0.7)
+        plt.title(f'PCA Scatter Plot: PC{pc_x + 1} vs PC{pc_y + 1}')
+        plt.xlabel(f'PC{pc_x + 1}')
+        plt.ylabel(f'PC{pc_y + 1}')
+        plt.colorbar(scatter, label='Label (0: Negative, 1: Positive)')
+        if save_path:
+            plt.savefig(save_path)
+        else:
+            plt.show()
+        plt.close()
+
+    def find_best_clustering_components(self, n_top=5):
+        """
+        Find top N PCA components that best cluster the labels using silhouette score.
+        Returns list of (component_index, score) sorted by score descending.
+        """
+        if self.pca_transformed is None:
+            self.compute_pca()
+
+        scores = []
+        for i in range(self.n_components):
+            # Silhouette score for clustering quality
+            score = silhouette_score(self.pca_transformed[:, i].reshape(-1, 1), self.all_labels)
+            scores.append((i, score))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:n_top]
+
+    def find_best_separating_components(self, n_top=5):
+        """
+        Find top N PCA components that best separate positives from negatives using t-test p-value.
+        Lower p-value means better separation.
+        Returns list of (component_index, p_value) sorted by p_value ascending.
+        """
+        if self.pca_transformed is None:
+            self.compute_pca()
+
+        p_values = []
+        pos = self.pca_transformed[self.all_labels == 1]
+        neg = self.pca_transformed[self.all_labels == 0]
+
+        for i in range(self.n_components):
+            _, p = ttest_ind(pos[:, i], neg[:, i])
+            p_values.append((i, p))
+
+        p_values.sort(key=lambda x: x[1])
+        return p_values[:n_top]
+
+    def plot_best_separating_scatter(self, comp1, comp2, save_path=None):
+        """Plot scatter for two specific components, colored by label."""
+        self.plot_pca_scatter(pc_x=comp1, pc_y=comp2, save_path=save_path)
+
+    def run_full_analysis(self, output_dir='analysis_results'):
+        """Run all analyses and save plots to output_dir."""
+        os.makedirs(output_dir, exist_ok=True)
+
+        self.compute_pca()
+
+        self.plot_histogram_lengths(save_path=os.path.join(output_dir, 'lengths_hist.png'))
+        self.plot_histogram_positives(save_path=os.path.join(output_dir, 'positives_bar.png'))
+
+        # Plot first two PCA
+        self.plot_pca_scatter(0, 1, save_path=os.path.join(output_dir, 'pca_1_vs_2.png'))
+
+        # Best clustering
+        best_cluster = self.find_best_clustering_components()
+        print("Best clustering components (silhouette):", best_cluster)
+
+        # Best separating
+        best_sep = self.find_best_separating_components()
+        print("Best separating components (t-test p-value):", best_sep)
+
+        # Plot top separating pair (first two of top)
+        if len(best_sep) >= 2:
+            comp1, comp2 = best_sep[0][0], best_sep[1][0]
+            self.plot_best_separating_scatter(comp1, comp2, save_path=os.path.join(output_dir, 'best_sep_scatter.png'))
+
+        # Plot all top separating as histograms for separation viz
+        for i, (comp, p) in enumerate(best_sep):
+            plt.figure(figsize=(10, 6))
+            sns.histplot(self.pca_transformed[self.all_labels == 0, comp], color='blue', label='Negative', kde=True)
+            sns.histplot(self.pca_transformed[self.all_labels == 1, comp], color='orange', label='Positive', kde=True)
+            plt.title(f'Histogram of PC{comp + 1} by Label (p={p:.2e})')
+            plt.xlabel(f'PC{comp + 1}')
+            plt.ylabel('Density')
+            plt.legend()
+            plt.savefig(os.path.join(output_dir, f'sep_hist_pc{comp + 1}.png'))
+            plt.close()
+
 
 
 class Analysis:

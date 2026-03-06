@@ -4,6 +4,7 @@ from models import SequenceActiveSiteHead
 import torch
 from training import OptunaSearch, TrainingPipeline, EPTrainer
 from training.params import ModelParamSpace, TrainerParamSpace
+torch.autograd.set_detect_anomaly(True)
 
 data_name = 'IEDB_Jespersen'
 model_name = 'esmc_300m'
