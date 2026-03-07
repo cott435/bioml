@@ -10,6 +10,7 @@ from typing import Any, Dict
 import torch
 from pathlib import Path
 import json
+import pandas as pd
 
 
 class BaseSearch:
@@ -59,39 +60,12 @@ class BaseSearch:
         trial_data_dir.mkdir(parents=True, exist_ok=True)
         return trial_ckpt_dir, trial_log_dir, trial_data_dir
 
-    def _memory_report(
-            self,
-            mem_before: Dict[str, float | None],
-            py_before,
-    ) -> Dict[str, Any]:
-        mem_after = self._memory_snapshot()
-        memory_report = {
-            "rss_mb_before": mem_before["rss_mb"],
-            "rss_mb_after": mem_after["rss_mb"],
-            "rss_mb_delta": (
-                mem_after["rss_mb"] - mem_before["rss_mb"]
-                if mem_before["rss_mb"] is not None and mem_after["rss_mb"] is not None
-                else None
-            ),
-            "cuda_allocated_mb_before": mem_before["cuda_allocated_mb"],
-            "cuda_allocated_mb_after": mem_after["cuda_allocated_mb"],
-            "cuda_reserved_mb_before": mem_before["cuda_reserved_mb"],
-            "cuda_reserved_mb_after": mem_after["cuda_reserved_mb"],
-        }
-        if py_before is not None and tracemalloc.is_tracing():
-            py_after = tracemalloc.take_snapshot()
-            top_stats = py_after.compare_to(py_before, "lineno")[:self.memory_debug_top_n]
-            memory_report["python_top_allocations"] = [str(stat) for stat in top_stats]
-        return memory_report
-
     def _run_trial(
             self,
             trial_num: int,
             params: Dict[str, Any],
             trial: optuna.Trial | None = None,
-    ) -> tuple[float, Dict[str, Any]]:
-        mem_before = self._memory_snapshot()
-        py_before = tracemalloc.take_snapshot() if self.memory_debug and tracemalloc.is_tracing() else None
+    ):
         try:
             trial_ckpt_dir, trial_log_dir, trial_data_dir = self._trial_paths(trial_num)
             score = self.pipeline.run(
@@ -101,8 +75,7 @@ class BaseSearch:
                 data_dir=trial_data_dir,
                 trial=trial,
             )
-            memory_report = self._memory_report(mem_before, py_before)
-            return score, memory_report
+            return score
         finally:
             gc.collect()
             if torch.cuda.is_available():
@@ -129,32 +102,28 @@ class BaseSearch:
         with open(self.save_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)
 
-    @staticmethod
-    def _memory_snapshot() -> Dict[str, float | None]:
-        rss_mb = None
-        try:
-            status_path = Path("/proc/self/status")
-            if status_path.exists():
-                for line in status_path.read_text().splitlines():
-                    if line.startswith("VmRSS:"):
-                        kb = float(line.split()[1])
-                        rss_mb = kb / 1024.0
-                        break
-        except Exception:
-            rss_mb = None
+    def _export_trials_to_excel(self, filename: str = "results.xlsx"):
+        trial_records = []
+        for trial_file in sorted(self.trial_dir.glob("trial_*.json")):
+            try:
+                with open(trial_file, "r") as f:
+                    trial_records.append(json.load(f))
+            except Exception:
+                continue
 
-        cuda_allocated_mb = None
-        cuda_reserved_mb = None
-        if torch.cuda.is_available():
-            cuda_allocated_mb = torch.cuda.memory_allocated() / (1024.0 ** 2)
-            cuda_reserved_mb = torch.cuda.memory_reserved() / (1024.0 ** 2)
+        trials_df = pd.json_normalize(trial_records) if trial_records else pd.DataFrame()
 
-        return {
-            "rss_mb": rss_mb,
-            "cuda_allocated_mb": cuda_allocated_mb,
-            "cuda_reserved_mb": cuda_reserved_mb,
-        }
+        summary_path = self.save_dir / "summary.json"
+        summary_df = pd.DataFrame()
+        if summary_path.exists():
+            with open(summary_path, "r") as f:
+                summary = json.load(f)
+            summary_df = pd.json_normalize(summary)
 
+        excel_path = self.trial_dir / filename
+        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+            trials_df.to_excel(writer, sheet_name="trials", index=False)
+            summary_df.to_excel(writer, sheet_name="summary", index=False)
 
 class GridSearch(BaseSearch):
     def __init__(
@@ -226,20 +195,21 @@ class GridSearch(BaseSearch):
 
         for trial_num, sampled_params in enumerate(param_sets):
             all_params = {**self.fixed_params, **sampled_params}
-            score, memory_report = self._run_trial(trial_num=trial_num, params=all_params)
+            score = self._run_trial(trial_num=trial_num, params=all_params)
 
             if self._is_better(score):
                 self._best_trial = trial_num
                 self._best_value = score
                 self._best_params = dict(all_params)
 
-            self._record_trial(trial_num, all_params, score=score, memory=memory_report)
+            self._record_trial(trial_num, all_params, score=score)
 
         self._save_summary({
             "best_trial": self._best_trial,
             "best_value": self._best_value,
             "best_params": self._best_params,
         })
+        self._export_trials_to_excel()
 
     @property
     def best_params(self) -> Dict[str, Any]:
@@ -320,15 +290,14 @@ class OptunaSearch(BaseSearch):
             t_params = self.sample_params(trial, self.trainer_params)
             all_params = {**m_params, **t_params}
 
-            score, memory_report = self._run_trial(
+            score = self._run_trial(
                 trial_num=trial.number,
                 params=all_params,
                 trial=trial,
             )
 
-            for key, value in memory_report.items():
-                trial.set_user_attr(key, value)
-            self._record_trial(trial.number, all_params, score=score, memory=memory_report)
+
+            self._record_trial(trial.number, all_params, score=score)
             if trial.should_prune():
                 raise optuna.TrialPruned()
             return score
@@ -342,6 +311,7 @@ class OptunaSearch(BaseSearch):
             "best_value": self.study.best_value,
             "best_params": self.study.best_params,
         })
+        self._export_trials_to_excel()
 
     @property
     def best_params(self) -> Dict[str, Any]:
@@ -350,4 +320,3 @@ class OptunaSearch(BaseSearch):
     @property
     def best_value(self) -> float:
         return self.study.best_value
-

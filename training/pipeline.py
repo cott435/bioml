@@ -23,7 +23,7 @@ class TrainingPipeline:
             test_size: float = 0.2,
             epochs: int = 15,
             base_seed: int = 42,
-            single_batch: bool = False,
+            small_batch=None,
     ):
         self.dataset = dataset
         self.model_class = model_class
@@ -36,8 +36,12 @@ class TrainingPipeline:
         self.train_idx, self.val_idx = next(cv_splitter.split(self.dataset.data, groups=groups))
 
         self.final_bias = self._calculate_output_bias()
-        if single_batch:
-            self.train_idx, self.val_idx = np.array([2]), np.array([3])
+        if small_batch:
+            if small_batch > 1:
+                self.train_idx = self.train_idx[:small_batch]
+                self.val_idx = self.val_idx[:small_batch]
+            else:
+                self.train_idx, self.val_idx = np.array([2]), np.array([3])
 
     def _calculate_output_bias(self):
         training_data = self.dataset.data.iloc[self.train_idx]
@@ -55,7 +59,7 @@ class TrainingPipeline:
         lengths = self.dataset.get_lengths()
 
         train_loader_sampler = RandomTokenBatchSampler(
-            train_ds, lengths[self.train_idx], max_tokens=max_tokens, drop_last=len(self.train_idx) > 5
+            train_ds, lengths[self.train_idx], max_tokens=max_tokens, drop_last=len(self.train_idx) > 300
         )
         train_eval_loader_sampler = SortedTokenBatchSampler(
             train_ds, lengths[self.train_idx], max_tokens=max_tokens * 3

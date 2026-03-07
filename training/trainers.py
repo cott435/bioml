@@ -154,13 +154,13 @@ class EPTrainer:
         return accumulated_loss
 
     def evaluate_epoch(self, loader, epoch, metrics_store, prefix):
-        labels, logits, losses, batch_losses = self.collect_outputs(
+        labels, logits, losses = self.collect_outputs(
             self.model, loader, self.criterion, self.device
         )
         probs = torch.sigmoid(torch.from_numpy(logits)).numpy()
         main_score, metrics = self.compute_val_metric(probs, labels)
 
-        avg_loss = float(np.mean(batch_losses)) if len(batch_losses) else float('nan')
+        avg_loss = losses.mean()
         metrics_store['labels'].append(labels)
         metrics_store['logits'].append(logits)
         metrics_store['losses'].append(losses)
@@ -172,24 +172,23 @@ class EPTrainer:
         self.log_loss(avg_loss, epoch, name)
         self.log_hist(logits[labels==1], epoch, f'{name}/PositiveLogits')
         self.log_hist(logits[labels == 0], epoch, f'{name}/NegativeLogits')
-        del labels, logits, losses, batch_losses, probs
+        del labels, logits, losses, probs
         return main_score
 
     @staticmethod
     def collect_outputs(model, loader, criterion, device):
         model.eval()
-        all_labels, all_logits, all_losses, batch_losses = [], [], [], []
+        all_labels, all_logits, all_losses = [], [], []
 
         def iter_batch(batch):
             if isinstance(batch[0], torch.Tensor):
                 embeds, labels, mask = (b.to(device) for b in batch)
                 logits = model(embeds, mask=mask)
                 loss = criterion(logits, labels, mask)
-                normed_loss = criterion.reduce_loss(loss, labels, mask)
+
                 all_logits.extend(torch.masked_select(logits, mask).detach().cpu().numpy())
                 all_labels.extend(torch.masked_select(labels, mask).detach().cpu().numpy())
                 all_losses.extend(torch.masked_select(loss, mask).detach().cpu().numpy())
-                batch_losses.extend(normed_loss.detach().cpu().numpy())
             else:
                 for sub_batch in batch:
                     iter_batch(sub_batch)
@@ -202,7 +201,6 @@ class EPTrainer:
             np.array(all_labels),
             np.array(all_logits),
             np.array(all_losses),
-            np.array(batch_losses),
         )
 
     @staticmethod
