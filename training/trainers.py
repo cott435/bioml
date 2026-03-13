@@ -7,6 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 from torch.utils.data import DataLoader
 from .losses import DynamicBinaryFocalLoss, BinaryFocalLoss
+from .logging_ import ConvNeXtTelemetry
 import optuna
 from collections import defaultdict
 from .schedulers import get_cosine_scheduler
@@ -24,7 +25,7 @@ class EPTrainer:
             lr_restarts = False,
             backbone_lr_ratio = 0.1,
             base_lr=1e-4,
-            warmup_len=0.1,
+            warmup_len=0.2,
             epochs=10,
             max_norm=None,
             weight_decay=0.01,
@@ -56,6 +57,11 @@ class EPTrainer:
             self.criterion = BinaryFocalLoss(alpha=alpha, gamma=gamma, reduction='none')
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
+        self.model_telemetry = ConvNeXtTelemetry(
+            self.model,
+            self.writer,
+            log_every_steps=len(train_loader),
+        ) if self.writer else None
 
         self.max_norm = max_norm if max_norm else float('inf')
         self.best_metric = -float('inf')
@@ -67,7 +73,8 @@ class EPTrainer:
         self.train_metrics = defaultdict(list)
         self.val_metrics = defaultdict(list)
 
-    def train(self, trial=None):
+    def train(self, trial=None, stop_overfit=True):
+        train_score = 0
         try:
             epochs = tqdm(range(self.epochs), desc="Epochs")
             for epoch in epochs:
@@ -75,20 +82,26 @@ class EPTrainer:
                 self.train_epoch()
                 train_val_score = self.evaluate_epoch(self.train_eval_loader, epoch, self.train_metrics, prefix='TrainMetrics')
                 score = self.evaluate_epoch(self.val_loader, epoch, self.val_metrics, prefix='ValMetrics')
+                train_score = max(train_score, train_val_score)
                 if score > self.best_metric:
                     self.best_metric = score
                     self.save_checkpoint('best_model.pth')
                 epochs.set_postfix(val_score=score, train_val_score=train_val_score)
+                if train_val_score > 2.5 * self.best_metric and stop_overfit:
+                    if trial is not None:
+                        raise optuna.TrialPruned()
+                    else:
+                        raise Exception('Overfitting occurred')
                 if trial is not None:
                     trial.report(score, epoch)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
-            return self.best_metric
+            return self.best_metric, train_score
         except optuna.TrialPruned:
-            return self.best_metric
+            return self.best_metric, train_score
         except Exception as e:
             print(f"Training failed: {e}")
-            return self.best_metric
+            return self.best_metric, train_score
         finally:
             if self.data_dir:
                 train_metrics = self._stack_metrics(self.train_metrics)
@@ -99,6 +112,8 @@ class EPTrainer:
                 self.train_metrics.clear()
                 self.val_metrics.clear()
             if self.writer:
+                if self.model_telemetry:
+                    self.model_telemetry.close()
                 self.writer.close()
 
     def train_epoch(self, accumulate=True):
@@ -170,8 +185,14 @@ class EPTrainer:
         self.log_metrics(metrics, epoch, prefix=prefix)
         name = 'TrainVal' if 'train' in prefix.lower() else 'Val'
         self.log_loss(avg_loss, epoch, name)
-        self.log_hist(logits[labels==1], epoch, f'{name}/PositiveLogits')
-        self.log_hist(logits[labels == 0], epoch, f'{name}/NegativeLogits')
+        pos_logits = logits[labels == 1]
+        neg_logits = logits[labels == 0]
+        self.log_hist(pos_logits, epoch, f'{name}/PositiveLogits')
+        self.log_hist(neg_logits, epoch, f'{name}/NegativeLogits')
+        self.log_metrics({
+            f'Logits/{name}/PositiveMedian': self._safe_median(pos_logits),
+            f'Logits/{name}/NegativeMedian': self._safe_median(neg_logits),
+        }, epoch)
         del labels, logits, losses, probs
         return main_score
 
@@ -216,6 +237,12 @@ class EPTrainer:
                     stacked[key] = np.array(values, dtype=object)
         return stacked
 
+    @staticmethod
+    def _safe_median(values):
+        if values is None or len(values) == 0:
+            return float('nan')
+        return float(np.median(values))
+
     def log_training_step(self, grad_norm):
         items = {
             'Misc/GradNorm': grad_norm,
@@ -224,9 +251,17 @@ class EPTrainer:
             }
         self.log_metrics(items, self.total_steps)
         self.log_metrics(self.criterion.get_current_params(), self.total_steps, prefix='LossWeights')
-        gammas = [layer.pw[2].gamma for layer in self.model.stack.stack]
-        if gammas[0] is not None and self.total_steps % 10 == 0:
-            self.log_hist(torch.stack(gammas, dim=0).mean(0), self.total_steps, 'Model/Gamma')
+        return
+        gammas = [
+            layer.pw[2].gamma
+            for layer in self.model.stack.stack
+            if hasattr(layer, 'pw') and len(layer.pw) > 2 and hasattr(layer.pw[2], 'gamma')
+        ]
+        if gammas and gammas[0] is not None and self.total_steps % 10 == 0:
+            gamma_tensor = torch.stack(gammas, dim=0).float()
+            self.log_metrics({'Model/GammaStd': gamma_tensor.std().item()}, self.total_steps)
+        if self.model_telemetry:
+            self.model_telemetry.log_step(self.total_steps)
 
     def log_loss(self, value, step, name):
         self.log_metrics({f'Loss/{name}': value}, step)

@@ -68,14 +68,14 @@ class BaseSearch:
     ):
         try:
             trial_ckpt_dir, trial_log_dir, trial_data_dir = self._trial_paths(trial_num)
-            score = self.pipeline.run(
+            val_score, train_score = self.pipeline.run(
                 params=params,
                 ckpt_dir=trial_ckpt_dir,
                 log_dir=trial_log_dir,
                 data_dir=trial_data_dir,
                 trial=trial,
             )
-            return score
+            return val_score, train_score
         finally:
             gc.collect()
             if torch.cuda.is_available():
@@ -195,14 +195,14 @@ class GridSearch(BaseSearch):
 
         for trial_num, sampled_params in enumerate(param_sets):
             all_params = {**self.fixed_params, **sampled_params}
-            score = self._run_trial(trial_num=trial_num, params=all_params)
+            val_score, train_score = self._run_trial(trial_num=trial_num, params=all_params)
 
-            if self._is_better(score):
+            if self._is_better(val_score):
                 self._best_trial = trial_num
-                self._best_value = score
+                self._best_value = val_score
                 self._best_params = dict(all_params)
 
-            self._record_trial(trial_num, all_params, score=score)
+            self._record_trial(trial_num, all_params, val_score=val_score, train_score=train_score)
 
         self._save_summary({
             "best_trial": self._best_trial,
@@ -290,17 +290,17 @@ class OptunaSearch(BaseSearch):
             t_params = self.sample_params(trial, self.trainer_params)
             all_params = {**m_params, **t_params}
 
-            score = self._run_trial(
+            val_score, train_score = self._run_trial(
                 trial_num=trial.number,
                 params=all_params,
                 trial=trial,
             )
 
 
-            self._record_trial(trial.number, all_params, score=score)
+            self._record_trial(trial.number, all_params, val_score=val_score, train_score=train_score)
             if trial.should_prune():
                 raise optuna.TrialPruned()
-            return score
+            return val_score
         finally:
             del all_params
 

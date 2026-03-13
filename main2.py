@@ -1,6 +1,6 @@
 from pathlib import Path
-from data import ESMCSingleDS
-from models import SequenceActiveSiteHead
+from data import ESMCSingleDS, PackedSequenceDataset
+from models import SequenceActiveSiteHead, TokenActivationHead
 import torch
 from training import OptunaSearch, TrainingPipeline, EPTrainer, SinglePipeline, GridSearch
 from training.params import ModelParamSpace, TrainerParamSpace
@@ -10,23 +10,25 @@ model_name = 'esmc_300m'
 base_data_dir = Path.cwd() / 'data' / 'data_files'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-
-dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+#dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+#dataset.save_full_embedding()
+dataset = PackedSequenceDataset(data_name, model_name, save_dir=base_data_dir)
 
 results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace(hidden_dim=128, activation='gelu', layers=5, kernel_size=3, expansion_ratio=2, block_type='ConvNeXt1DBlock')
 trainer_param_space = TrainerParamSpace(max_tokens=30000, gamma=2, alpha=0.5)
 
-pipeline = TrainingPipeline(dataset, SequenceActiveSiteHead, EPTrainer, device=device, epochs=40, small_batch=25)
+pipeline = TrainingPipeline(dataset, TokenActivationHead, EPTrainer, device=device, epochs=40, small_batch=400)
 
-params = {'hidden_dim': [128, 256], 'base_lr': [3e-3, 1e-3, 3e-4], 'backbone_lr_ratio': [0.1, 1],
-          'gamma': [2, 4], 'alpha': [0.1, 0.25], 'dropout': 0.0, "layers": [4, 6],
+params = {'hidden_dim': 128, 'base_lr': 3e-3,
+          'gamma': [2, 4], 'alpha': 0.25, 'dropout': 0.0, "layers": 4,
           'jitter': 0.000, 'warmup_len': 0.2, 'token_dropout':0.0, 'loss_start_ratio': [None, 0.2],
           'max_tokens': 60000, 'max_norm': 5, 'inp_norm': True}
 
-ss = GridSearch(pipeline, params, 'small_batch_grid', base_save_dir=results_dir)
-ss.optimize()
 
+ss = GridSearch(pipeline, params, 'small_batch_grid3', base_save_dir=results_dir)
+
+ss.optimize()
 
 
 

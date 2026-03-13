@@ -24,12 +24,14 @@ class TrainingPipeline:
             epochs: int = 15,
             base_seed: int = 42,
             small_batch=None,
+            stop_overfit: bool = True,
     ):
         self.dataset = dataset
         self.model_class = model_class
         self.trainer_class = trainer_class
         self.epochs = epochs
         self.device = device if isinstance(device, torch.device) else torch.device(device)
+        self.stop_overfit = stop_overfit
 
         groups = self.dataset.get_data_groups() if hasattr(self.dataset, 'get_data_groups') else None
         cv_splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=base_seed)
@@ -53,8 +55,8 @@ class TrainingPipeline:
         train_ds = Subset(self.dataset, self.train_idx)
         val_ds = Subset(self.dataset, self.val_idx)
 
-        num_workers = cpu_count() // 2 if self.device.type == 'cuda' else 0
-        prefetch_factor = 2 if num_workers > 0 else None
+        num_workers = max(2, cpu_count() - 2) if self.device.type == 'cuda' else 0
+        prefetch_factor = 4 if num_workers > 0 else None
         persistent_workers =  num_workers > 0
         lengths = self.dataset.get_lengths()
 
@@ -148,7 +150,7 @@ class TrainingPipeline:
                 **trainer_kwargs,
             )
 
-            return trainer.train(trial)
+            return trainer.train(trial, stop_overfit=self.stop_overfit)
         finally:
             self._shutdown_loader_workers(train_loader)
             self._shutdown_loader_workers(train_eval_loader)

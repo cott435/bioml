@@ -44,7 +44,7 @@ class ESMCEmbedder:
                  max_seq_len=2000,
                  seq_overlap=250,
                  device: torch.device | str='cpu'):
-        self.file_path = save_dir / f'{model_name}_embeddings.h5' if save_dir else None
+        self.file_path = save_dir / model_name / f'{model_name}_embeddings.h5' if save_dir else None
         if save_dir:
             save_dir.mkdir(exist_ok=True)
         self.emb_config = LogitsConfig(sequence=True, return_embeddings=True, return_hidden_states=True)

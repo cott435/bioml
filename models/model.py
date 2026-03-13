@@ -44,7 +44,7 @@ class SequenceActiveSiteHead(nn.Module):
     def __init__(self, in_dim, out_dim=1, layers=4, hidden_dim=None, activation='gelu',
                  dropout=0.2, block_type='ConvNeXt1DBlock', kernel_size=3, final_bias=0,
                  drop_path_rate=0.0, expansion_ratio=4, feature_dropout=None, inp_norm=True,
-                 feature_dropout_first=False, token_dropout=None, final_norm=False):
+                 feature_dropout_first=True, token_dropout=None, final_norm=False):
         super().__init__()
         self.inp_norm = MaskedInstanceNorm1d(in_dim) if inp_norm else None
         self.in_proj = nn.Linear(in_dim, hidden_dim) if hidden_dim else nn.Identity()
@@ -144,5 +144,108 @@ class SequenceInteractionHead(nn.Module):
         return interaction
 
 
+class TokenActivationHead(nn.Module):
+    """
+    Predicts a per-token activation from frozen ESM embeddings.
 
+    Input:
+        (B, L, embed_dim)
 
+    Output:
+        (B, L)
+    """
+
+    def __init__(
+        self,
+        embed_dim=960,
+        hidden_dim=128,
+        layers=3,
+        activation="gelu",
+        dropout=0.2,
+        kernel_size=3,
+        inp_norm=True,
+        token_dropout=None,
+        feature_dropout=None,
+        norm=False,
+        final_bias=0,
+        **kwargs
+    ):
+        super().__init__()
+
+        self.inp_norm = MaskedInstanceNorm1d(embed_dim) if inp_norm else None
+        self.feature_dropout = nn.Dropout1d(feature_dropout) if feature_dropout else nn.Identity()
+        self.token_dropout = nn.Dropout1d(token_dropout) if token_dropout else nn.Identity()
+
+        # activation selection
+        if activation == "gelu":
+            self.activation = nn.GELU()
+        elif activation == "silu":
+            self.activation = nn.SiLU()
+        elif activation == "relu":
+            self.activation = nn.ReLU()
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        # input projection (1x1 conv acts like token-wise linear)
+        self.in_proj = nn.Conv1d(embed_dim, hidden_dim, kernel_size=1)
+
+        self.stack = nn.ModuleList()
+        self.norms = nn.ModuleList()
+
+        for _ in range(layers):
+            self.stack.append(
+                nn.Conv1d(
+                    hidden_dim,
+                    hidden_dim,
+                    kernel_size=kernel_size,
+                    padding=1,
+                )
+            )
+            self.norms.append(nn.LayerNorm(hidden_dim) if norm else nn.Identity())
+
+        self.dropout_layer = nn.Dropout(dropout)
+
+        # output projection
+        self.out_proj = nn.Linear(hidden_dim, 1)
+        self._init_weights(final_bias)
+
+    def _init_weights(self, final_bias):
+        nn.init.kaiming_normal_(self.in_proj.weight, mode='fan_in')
+        self.stack.apply(self._init_weights_loop)
+        if self.in_proj.bias is not None:
+            nn.init.zeros_(self.in_proj.bias)
+        nn.init.normal_(self.out_proj.weight, std=0.01)
+        nn.init.constant_(self.out_proj.bias, final_bias)
+
+    def _init_weights_loop(self, m):
+        if isinstance(m, (nn.Conv2d, nn.Linear, nn.Conv1d)):
+            feats = m.in_features if hasattr(m, 'in_features') else m.in_channels
+            trunc_normal_(m.weight, std=feats**-0.5)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x, mask=None):
+        """
+        x: (B, L, embed_dim)
+        """
+
+        x = x.transpose(1, 2)
+        mask = mask.unsqueeze(1) if mask is not None else torch.ones_like(x)
+        x = self.in_proj(x)
+
+        for conv, norm in zip(self.stack, self.norms):
+            x = x * mask
+            x = conv(x)
+
+            x = x.transpose(1, 2)
+
+            x = norm(x)
+            x = self.activation(x)
+            x = self.dropout_layer(x)
+
+            x = x.transpose(1, 2)
+
+        x = x.transpose(1, 2)
+        x = self.out_proj(x)
+
+        return x.squeeze(-1)
