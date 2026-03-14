@@ -6,7 +6,7 @@ from .norm import MaskedInstanceNorm1d
 
 blocks = {'Conv1dInvBottleNeck': Conv1dInvBottleNeck, 'ConvNeXt1DBlock': ConvNeXt1DBlock,}
 
-class Conv1dStack(nn.Module):
+class Stack1D(nn.Module):
 
     def __init__(self, dim, layers=1, expansion_ratio=4, kernel_size=3,
                  activation='relu', dropout=0.1, block_type='ConvNeXt1DBlock',
@@ -49,10 +49,10 @@ class SequenceActiveSiteHead(nn.Module):
         self.inp_norm = MaskedInstanceNorm1d(in_dim) if inp_norm else None
         self.in_proj = nn.Linear(in_dim, hidden_dim) if hidden_dim else nn.Identity()
         hidden_dim = hidden_dim or in_dim
-        self.stack = Conv1dStack(hidden_dim, dropout=dropout,
-                                 activation=activation, layers=layers,
-                                 block_type=block_type, kernel_size=kernel_size, final_norm=final_norm,
-                                 drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio)
+        self.stack = Stack1D(hidden_dim, dropout=dropout,
+                             activation=activation, layers=layers,
+                             block_type=block_type, kernel_size=kernel_size, final_norm=final_norm,
+                             drop_path_rate=drop_path_rate, expansion_ratio=expansion_ratio)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
         self.feature_dropout_first = feature_dropout_first
         self.feature_dropout = nn.Dropout1d(feature_dropout) if feature_dropout else nn.Identity()
@@ -198,7 +198,7 @@ class TokenActivationHead(nn.Module):
                     hidden_dim,
                     hidden_dim,
                     kernel_size=kernel_size,
-                    padding=1,
+                    padding=kernel_size//2,
                 )
             )
             self.norms.append(nn.LayerNorm(hidden_dim) if norm else nn.Identity())
