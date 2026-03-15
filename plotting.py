@@ -35,9 +35,6 @@ def hist(x, bin=100):
     plt.figure()
     plt.hist(x.flatten(), bins=bin)
 
-def apply_mask(x, mask):
-    x, mask = x.reshape(-1), mask.reshape(-1)
-    return x[mask]
 
 def hists(xs, bin=100, name=None, mask=None, tails=False):
     if not isinstance(xs, list):
@@ -48,7 +45,7 @@ def hists(xs, bin=100, name=None, mask=None, tails=False):
     for i, ax in enumerate(axs.flatten()):
         x = xs[i]
         if mask is not None:
-            x = apply_mask(x, mask)
+            x = x[mask]
         if isinstance(x, torch.Tensor):
             x = x.to(torch.float32).cpu().detach().numpy()
         else:

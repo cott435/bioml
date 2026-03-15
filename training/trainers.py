@@ -6,7 +6,6 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import precision_recall_fscore_support, matthews_corrcoef, average_precision_score
 from torch.utils.data import DataLoader
-from .losses import DynamicBinaryFocalLoss, BinaryFocalLoss
 from .logging_ import ConvNeXtTelemetry
 import optuna
 from collections import defaultdict
@@ -18,6 +17,7 @@ class EPTrainer:
     def __init__(
             self,
             model,
+            loss_criterion,
             train_loader: DataLoader,
             val_loader: DataLoader,
             train_eval_loader: DataLoader | None = None,
@@ -29,14 +29,10 @@ class EPTrainer:
             epochs=10,
             max_norm=None,
             weight_decay=0.01,
-            gamma=2,
-            alpha=0.25,
             jitter = 0.0,
             ckpt_dir=None,
             log_dir=None,
             data_dir=None,
-            loss_start_ratio = None,
-            loss_end_ratio = 0.8,
     ):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = model.to(self.device)
@@ -45,16 +41,13 @@ class EPTrainer:
 
         self.optimizer = torch.optim.AdamW([
                 {"params": model.stack.parameters(), "lr": base_lr},
+                {"params": model.inp_norm.parameters(), "lr": base_lr},
                 {"params": model.in_proj.parameters(), "lr": base_lr * backbone_lr_ratio},
                 {"params": model.out_proj.parameters(), "lr": base_lr * backbone_lr_ratio},
             ], weight_decay=weight_decay)
         total_steps = epochs * len(train_loader)
         self.scheduler = get_cosine_scheduler(self.optimizer, total_steps, warmup_len=warmup_len, use_restarts=lr_restarts)
-        if loss_start_ratio:
-            self.criterion = DynamicBinaryFocalLoss(total_steps, reduction='none', start_alpha=alpha, end_alpha=alpha,
-                                                    end_gamma=gamma, start_ratio=loss_start_ratio, end_ratio=loss_end_ratio)
-        else:
-            self.criterion = BinaryFocalLoss(alpha=alpha, gamma=gamma, reduction='none')
+        self.criterion = loss_criterion
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
         self.model_telemetry = ConvNeXtTelemetry(
@@ -111,6 +104,7 @@ class EPTrainer:
                 del train_metrics, val_metrics
                 self.train_metrics.clear()
                 self.val_metrics.clear()
+            self.save_checkpoint('final_model.pth')
             if self.writer:
                 if self.model_telemetry:
                     self.model_telemetry.close()
@@ -122,6 +116,8 @@ class EPTrainer:
         loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
         for batch in loop:
             self.optimizer.zero_grad()
+            if hasattr(self.model.inp_norm, 'set_batch_stats'):
+                self.model.inp_norm.set_batch_stats(batch)
             loss = self._accumulate_grads(batch) if accumulate else self._get_grads(batch)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
@@ -146,8 +142,6 @@ class EPTrainer:
 
     def _accumulate_grads(self, batch):
         accumulated_loss = 0
-        acc_pos, acc_neg = 0, 0
-        accumulation_steps = sum([len(s[0]) for s in batch])
         total_valid_tokens = sum([s[2].sum().item() for s in batch])
         for embeds, targets, mask in batch:
             embeds, targets, mask = embeds.to(self.device), targets.to(self.device), mask.to(self.device)
@@ -158,14 +152,6 @@ class EPTrainer:
             seq_loss = loss.sum() / total_valid_tokens
             seq_loss.backward()
             accumulated_loss += seq_loss.item()
-
-            with torch.no_grad():
-                pos, neg = self.criterion.reduce_loss(loss.detach(), targets, mask, reduce=False)
-                acc_pos += (pos.sum() / accumulation_steps).item()
-                acc_neg += (neg.sum() / accumulation_steps).item()
-
-        self.log_loss(acc_pos, self.total_steps, 'TrainingPositive')
-        self.log_loss(acc_neg, self.total_steps, 'TrainingNegative')
         return accumulated_loss
 
     def evaluate_epoch(self, loader, epoch, metrics_store, prefix):
@@ -185,13 +171,17 @@ class EPTrainer:
         self.log_metrics(metrics, epoch, prefix=prefix)
         name = 'TrainVal' if 'train' in prefix.lower() else 'Val'
         self.log_loss(avg_loss, epoch, name)
-        pos_logits = logits[labels == 1]
-        neg_logits = logits[labels == 0]
+        pos, neg = labels == 1, labels == 0
+        pos_logits, neg_logits = logits[pos], logits[neg]
+        pos_loss, neg_loss = losses[pos].sum(), losses[neg].sum()
+        self.log_loss(pos_loss, epoch, f'{name}/PositiveLoss')
+        self.log_loss(neg_loss, epoch, f'{name}/NegativeLoss')
         self.log_hist(pos_logits, epoch, f'{name}/PositiveLogits')
         self.log_hist(neg_logits, epoch, f'{name}/NegativeLogits')
         self.log_metrics({
             f'Logits/{name}/PositiveMedian': self._safe_median(pos_logits),
             f'Logits/{name}/NegativeMedian': self._safe_median(neg_logits),
+            f'Logits/{name}/ProbsMean': probs.mean(),
         }, epoch)
         del labels, logits, losses, probs
         return main_score
@@ -204,6 +194,7 @@ class EPTrainer:
         def iter_batch(batch):
             if isinstance(batch[0], torch.Tensor):
                 embeds, labels, mask = (b.to(device) for b in batch)
+
                 logits = model(embeds, mask=mask)
                 loss = criterion(logits, labels, mask)
 
@@ -250,8 +241,8 @@ class EPTrainer:
             'Model/FinalBias': self.model.out_proj.bias,
             }
         self.log_metrics(items, self.total_steps)
-        self.log_metrics(self.criterion.get_current_params(), self.total_steps, prefix='LossWeights')
-        return
+        #self.log_metrics(self.criterion.get_current_params(), self.total_steps, prefix='LossWeights')
+
         gammas = [
             layer.pw[2].gamma
             for layer in self.model.stack.stack

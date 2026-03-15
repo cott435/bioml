@@ -22,17 +22,15 @@ class Tester:
             criterion,
             trial_name: str | None = None,
             device: torch.device | str = 'cpu',
-            checkpoint_name: str = 'best_model.pth',
+            checkpoint_name: str = 'final_model.pth',
             max_tokens: int = 10000,
     ):
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.data_dir, self.ckpt_dir = self._resolve_run_dirs(Path(file_dir), trial_name)
         self.params = self._load_params(self.data_dir)
 
-        model_params = signature(model_inst).parameters.keys()
-        model_params = {k: v for k, v in self.params.items() if k in model_params}
         embed_dim = self._resolve_embed_dim(dataset)
-        self.model = model_inst(embed_dim, **model_params)
+        self.model = model_inst(embed_dim, **self.params)
         self.dataset = dataset
         self.criterion = criterion
         self.max_tokens = self.params.get('max_tokens', max_tokens)

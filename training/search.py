@@ -195,7 +195,7 @@ class GridSearch(BaseSearch):
 
         for trial_num, sampled_params in enumerate(param_sets):
             all_params = {**self.fixed_params, **sampled_params}
-            val_score, train_score = self._run_trial(trial_num=trial_num, params=all_params)
+            val_score, train_score = self._run_trial(trial_num=trial_num, params=all_params.copy())
 
             if self._is_better(val_score):
                 self._best_trial = trial_num

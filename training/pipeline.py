@@ -11,6 +11,7 @@ from data.sampling import RandomTokenBatchSampler, SortedTokenBatchSampler
 import torch
 from sklearn.model_selection import GroupShuffleSplit
 from multiprocessing import cpu_count
+from .losses import DynamicBinaryFocalLoss, BinaryFocalLoss, BCELoss
 
 
 class TrainingPipeline:
@@ -103,6 +104,16 @@ class TrainingPipeline:
             iterator._shutdown_workers()
             loader._iterator = None
 
+    def _get_loss_criterion(self, loss_selection, pos_weight=10):
+        if loss_selection == 'BCE':
+            pos_weight = torch.tensor([pos_weight], device=self.device)
+            loss_criterion = BCELoss(reduction='none', pos_weight=pos_weight)
+        elif loss_selection == 'focal':
+            loss_criterion = BinaryFocalLoss()
+        else:
+            raise NotImplementedError
+        return loss_criterion
+
     def run(
             self,
             params: Dict[str, Any],
@@ -116,10 +127,11 @@ class TrainingPipeline:
         with open(data_dir / "params.json", "w") as f:
             json.dump(params, f, indent=2)
         self._save_split_indices(data_dir)
-        model_kwargs = {k: v for k, v in params.items() if k in self.model_class.__init__.__code__.co_varnames}
-        trainer_kwargs = {k: v for k, v in params.items() if k not in model_kwargs}
-
-        max_tokens = trainer_kwargs.pop("max_tokens", 10000)
+        max_tokens = params.pop("max_tokens", 10000)
+        loss_selection = params.pop("loss_selection", 'BCE')
+        pos_weight = params.pop("pos_weight", 10)
+        trainer_kwargs = {k: v for k, v in params.items() if k in self.trainer_class.__init__.__code__.co_varnames}
+        model_kwargs = {k: v for k, v in params.items() if k not in trainer_kwargs}
 
 
         train_loader = train_eval_loader = val_loader = None
@@ -133,12 +145,15 @@ class TrainingPipeline:
                 final_bias=self.final_bias
             )
 
+            loss_criterion = self._get_loss_criterion(loss_selection, pos_weight)
+
             trainer_extra = {}
             if 'train_eval_loader' in signature(self.trainer_class.__init__).parameters:
                 trainer_extra['train_eval_loader'] = train_eval_loader
 
             trainer = self.trainer_class(
                 model,
+                loss_criterion,
                 train_loader,
                 val_loader,
                 device=self.device,

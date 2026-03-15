@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
-from models.blocks import ConvNeXt1DBlock
+from models.blocks import ConvNeXt1DBlock,ResConvFFN
 
 
 def _rms(tensor: torch.Tensor) -> float:
@@ -59,7 +59,7 @@ class ConvNeXtTelemetry:
         )
 
         for name, module in model.named_modules():
-            if isinstance(module, ConvNeXt1DBlock):
+            if isinstance(module, (ConvNeXt1DBlock, ResConvFFN)):
                 self.blocks[name] = module
 
         self.enabled = writer is not None and len(self.blocks) > 0

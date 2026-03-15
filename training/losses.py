@@ -3,6 +3,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class BCELoss(nn.Module):
+
+    def __init__(self, reduction='mean', pos_weight=None):
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pos_weight)
+        self.reduction = reduction
+
+    def forward(self, logits, targets, mask=None):
+        bce_loss = self.bce(logits, targets)
+        loss = bce_loss * mask if mask is not None else bce_loss
+
+        if self.reduction == 'mean':
+            return loss.mean() if mask is None else loss.sum() / mask.sum()
+        elif self.reduction == 'targets':
+            return loss.sum() if mask is None else torch.mean(loss.sum(-1) / targets.sum(-1))
+        elif self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+    def step(self):
+        pass
+
+
 class BinaryFocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
         super().__init__()

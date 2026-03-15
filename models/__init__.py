@@ -1,1 +1,1 @@
-from .model import SequenceActiveSiteHead, TokenActivationHead
+from .model import TokenActivationHead

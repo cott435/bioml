@@ -1,9 +1,10 @@
 from pathlib import Path
 from data import ESMCSingleDS, PackedSequenceDataset
-from models import SequenceActiveSiteHead, TokenActivationHead
+from models import TokenActivationHead
 import torch
 from training import OptunaSearch, TrainingPipeline, EPTrainer, SinglePipeline, GridSearch
 from training.params import ModelParamSpace, TrainerParamSpace
+import numpy as np
 
 data_name = 'IEDB_Jespersen'
 model_name = 'esmc_300m'
@@ -18,17 +19,18 @@ results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace(hidden_dim=128, activation='gelu', layers=5, kernel_size=3, expansion_ratio=2, block_type='ConvNeXt1DBlock')
 trainer_param_space = TrainerParamSpace(max_tokens=30000, gamma=2, alpha=0.5)
 
-pipeline = TrainingPipeline(dataset, TokenActivationHead, EPTrainer, device=device, epochs=40, small_batch=15, stop_overfit=False)
+pipeline = TrainingPipeline(dataset, TokenActivationHead, EPTrainer, device=device, epochs=40, small_batch=200, stop_overfit=False)
 
-params = {'hidden_dim': 256, 'base_lr': [2e-3, 4e-3], 'kernel_size': [1, 3, 5],
-          'gamma': 0, 'alpha': 0.5, 'dropout': 0.0, "layers": 3, 'weight_decay': 0.0,
-          'jitter': 0.000, 'warmup_len': 0.2, 'token_dropout':0.0, 'loss_start_ratio': 0.25,
-          'max_tokens': 60000, 'max_norm': 5, 'inp_norm': True}
+params = {'hidden_dim': 128, 'base_lr': [3e-3, 6e-3], 'kernel_size': 3, 'inp_norm': 'instance',
+          'dropout': 0.2, "layers": 4, 'weight_decay': 0.01, 'pos_weight': [1, 5, 10, 20],
+          'jitter': 0.000, 'warmup_len': 0.2, 'token_dropout':0.15, 'feature_dropout': 0.2,
+          'max_tokens': 60000, 'max_norm': 0.5, 'block_type': ['ResConvFFN', 'ConvNeXt1DBlock']}
 
 
-ss = GridSearch(pipeline, params, 'test_batch_10_6', base_save_dir=results_dir)
+ss = GridSearch(pipeline, params, 'test_batch_200', base_save_dir=results_dir)
 
 ss.optimize()
+
 
 
 

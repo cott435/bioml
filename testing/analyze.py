@@ -7,6 +7,7 @@ from scipy.stats import ttest_ind
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import umap
 
 
 class ProteinEmbeddingAnalyzer:
@@ -476,3 +477,92 @@ class Analysis:
             ax.set_title(title)
         ax.set_xlabel("Logits")
         ax.legend()
+
+
+import torch
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+import umap
+
+
+def plot_global_latent_space(
+        train_tensor, val_tensor,
+        train_mask, val_mask,
+        train_labels, val_labels
+):
+    """
+    Plots PCA and UMAP projections for the entire batch of train and val tensors.
+
+    Args:
+        train_tensor, val_tensor: Tensors of shape (B, seq_len, m_dim)
+        train_mask, val_mask: Boolean tensors of shape (B, seq_len)
+        train_labels, val_labels: Tensors of shape (B, seq_len) with class labels
+    """
+
+    # 1. Apply masks to flatten the batch and extract only valid tokens
+    # This converts (B, seq_len, m_dim) -> (N_valid_tokens, m_dim)
+    X_train = train_tensor[train_mask].detach().cpu().numpy()
+    y_train = train_labels[train_mask].detach().cpu().numpy()
+
+    X_val = val_tensor[val_mask].detach().cpu().numpy()
+    y_val = val_labels[val_mask].detach().cpu().numpy()
+
+    # Safety check: ensure there is data to plot
+    if len(X_train) == 0 or len(X_val) == 0:
+        print("No valid tokens found in the batch.")
+        return
+
+    # 2. Initialize and Fit ON THE ENTIRE TRAINING BATCH
+    pca = PCA(n_components=2)
+    pca_train = pca.fit_transform(X_train)
+    pca_val = pca.transform(X_val)
+
+    reducer = umap.UMAP(n_components=2, random_state=42)
+    umap_train = reducer.fit_transform(X_train)
+    umap_val = reducer.transform(X_val)
+
+    sort_idx_train = np.argsort(y_train)
+    sort_idx_val = np.argsort(y_val)
+
+    pca_train_sorted = pca_train[sort_idx_train]
+    y_train_sorted = y_train[sort_idx_train]
+
+    pca_val_sorted = pca_val[sort_idx_val]
+    y_val_sorted = y_val[sort_idx_val]
+
+    umap_train_sorted = umap_train[sort_idx_train]
+
+    umap_val_sorted = umap_val[sort_idx_val]
+
+    # 3. Create a single 2x2 plot for the global batch distributions
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle('Global Latent Space Projections - Full Batch', fontsize=16)
+
+    # Plot PCA Train (Top Left)
+    axs[0, 0].scatter(pca_train_sorted[:, 0], pca_train_sorted[:, 1], c=y_train_sorted, cmap='coolwarm', alpha=0.5, s=10)
+    axs[0, 0].set_title('PCA - Train Batch')
+    axs[0, 0].set_xlabel('PC 1')
+    axs[0, 0].set_ylabel('PC 2')
+
+    # Plot PCA Val (Top Right)
+    axs[0, 1].scatter(pca_val_sorted[:, 0], pca_val_sorted[:, 1], c=y_val_sorted, cmap='coolwarm', alpha=0.5, s=10)
+    axs[0, 1].set_title('PCA - Validation Batch')
+    axs[0, 1].set_xlabel('PC 1')
+    axs[0, 1].set_ylabel('PC 2')
+
+    # Plot UMAP Train (Bottom Left)
+    axs[1, 0].scatter(umap_train_sorted[:, 0], umap_train_sorted[:, 1], c=y_train_sorted, cmap='coolwarm', alpha=0.5, s=10)
+    axs[1, 0].set_title('UMAP - Train Batch')
+    axs[1, 0].set_xlabel('UMAP 1')
+    axs[1, 0].set_ylabel('UMAP 2')
+
+    # Plot UMAP Val (Bottom Right)
+    axs[1, 1].scatter(umap_val_sorted[:, 0], umap_val_sorted[:, 1], c=y_val_sorted, cmap='coolwarm', alpha=0.5, s=10)
+    axs[1, 1].set_title('UMAP - Validation Batch')
+    axs[1, 1].set_xlabel('UMAP 1')
+    axs[1, 1].set_ylabel('UMAP 2')
+
+    plt.tight_layout()
+    plt.show()
+
+
