@@ -83,7 +83,7 @@ class TokenActivationHead(nn.Module):
         nn.init.constant_(self.out_proj.bias, final_bias)
 
 
-    def forward(self, embeds, mask=None, sigmoid=False):
+    def forward_(self, embeds, mask=None, sigmoid=False):
         x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
         x_norm = x
         x_proj = self.in_proj(x)
@@ -98,7 +98,7 @@ class TokenActivationHead(nn.Module):
         x = self.out_proj(x).squeeze(-1)
         return torch.sigmoid(x) if sigmoid else x
 
-    def forward_(self, embeds, mask=None, sigmoid=False):
+    def forward(self, embeds, mask=None, sigmoid=False):
         x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
         x = self.token_dropout(x)
         x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
