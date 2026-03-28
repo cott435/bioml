@@ -1,13 +1,56 @@
 from pathlib import Path
-import torch
 from data import ESMCSingleDS
+from ml.datasets import ESMCTokenFrameBuilder
+from ml.pipeline import MLBaselinePipeline, default_model_specs
+from ml.splits import GroupKFoldSplitStrategy, SingleGroupSplitStrategy
+from ml.utils import set_global_seed
 
 
-data_name = 'IEDB_Jespersen'
-model_name = 'esmc_300m'
-base_data_dir = Path.cwd() / 'data' / 'data_files'
+def main() -> None:
+    data_name = "IEDB_Jespersen"
+    model_name = "esmc_300m"
+    base_dir = Path(__file__).absolute().parents[1]
+    base_data_dir = base_dir / "data" / "data_files"
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+    seed = 42
+    max_tokens = 20000  # Set to None to use all tokens.
+    use_k_fold = True
+    n_splits = 5
+    test_size = 0.2
+    save_token_frame = False
 
-"""I want to add an ml pipeline to my protein sequence training. populate the directory ml with everything needed such as pipelines, main training scripts, and any other file needed to modularize this well. See ml/train_main.py for the start. My dataset can index all esm embeddings of proteins and has dataset.data that contains clusters which you will use for k fold cross validation. """
+    output_dir = base_dir / "experiments" / "ml_baselines"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    set_global_seed(seed)
+
+    dataset = ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+    token_dataset = ESMCTokenFrameBuilder(dataset, seed=seed).build(max_tokens=max_tokens)
+
+    split_strategy = (
+        GroupKFoldSplitStrategy(n_splits=n_splits)
+        if use_k_fold
+        else SingleGroupSplitStrategy(test_size=test_size, seed=seed)
+    )
+    pipeline = MLBaselinePipeline(model_specs=default_model_specs(), seed=seed)
+    results = pipeline.run(token_dataset, split_strategy)
+
+    results_path = output_dir / "results.xlsx"
+    results.to_excel(results_path, index=False)
+
+    ok_results = results[results["status"] == "ok"].copy()
+    summary = ok_results.groupby("model", as_index=False).mean(numeric_only=True) if not ok_results.empty else ok_results
+    summary_path = output_dir / "summary.xlsx"
+    summary.to_excel(summary_path, index=False)
+
+    if save_token_frame:
+        token_dataset.frame.to_parquet(output_dir / "token_frame.parquet", index=False)
+
+    print(f"Tokens: {token_dataset.num_tokens:,} | Features: {token_dataset.num_features}")
+    print(f"Saved split metrics to: {results_path}")
+    print(f"Saved model summary to: {summary_path}")
+    print(summary)
+
+
+if __name__ == "__main__":
+    main()
