@@ -1,8 +1,8 @@
 from pathlib import Path
 from data import ESMCSingleDS
-from models import SequenceActiveSiteHead
+from models import TokenActivationHead
 import torch
-from training import OptunaSearch, TrainingPipeline, EPTrainer
+from training import OptunaSearch, TrainingPipeline, TokenTrainer
 from training.params import ModelParamSpace, TrainerParamSpace
 torch.autograd.set_detect_anomaly(True)
 
@@ -19,7 +19,7 @@ results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace(hidden_dim=128, activation='gelu', layers=5, kernel_size=3, expansion_ratio=2, block_type='ConvNeXt1DBlock')
 trainer_param_space = TrainerParamSpace(max_tokens=30000, gamma=2, alpha=0.5)
 
-pipeline = TrainingPipeline(dataset, SequenceActiveSiteHead, EPTrainer, device=device)
+pipeline = TrainingPipeline(dataset, TokenActivationHead, TokenTrainer, device=device)
 
 op = OptunaSearch(pipeline, model_param_space, trainer_param_space, base_save_dir=results_dir, study_name='local')
 op.optimize(20)

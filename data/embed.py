@@ -177,6 +177,7 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
         batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
         loop = tqdm(batches, desc="Embedding batches")
+        raise NotImplementedError("Switch to lmdb")
         with h5py.File(self.file_path, "w" if force else "a") as hdf:
             for ids, batch in loop:
                 embedding_batch = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batch]
@@ -217,6 +218,7 @@ class ESMCForgeEmbedder(ESMCEmbedder):
             output_queue.put((id_, emb))
 
     def _hdf_writer(self, output_queue: mp.Queue, force=False):
+        raise NotImplementedError("Switch to lmdb")
         with h5py.File(self.file_path, 'w' if force else 'a') as hdf:
             while True:
                 item = output_queue.get()

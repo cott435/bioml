@@ -27,10 +27,15 @@ class GRN(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, 1, dim))
         self.beta = nn.Parameter(torch.zeros(1, 1, dim))
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
+        if mask is not None:
+            x = x * mask
         gx = torch.norm(x, p=2, dim=1, keepdim=True)
         nx = gx / (gx.mean(dim=-1, keepdim=True) + 1e-6)
-        return self.gamma * (x * nx) + self.beta + x
+        out = self.gamma * (x * nx) + self.beta + x
+        if mask is not None:
+            out = out * mask
+        return out
 
 
 class ConvFFN(nn.Module):
@@ -84,9 +89,9 @@ class ResConvFFN(nn.Module):
         dilation=1,
         dropout=0.1,
         activation='gelu',
-        norm=False,
+        norm=True,
         drop_path=0.0,
-        layer_scale_init_value = 0.0,
+        layer_scale_init_value = 0.00,
         **kwargs,
     ):
         super().__init__()
@@ -114,10 +119,10 @@ class ConvNeXt1DBlock(nn.Module):
         kernel_size=7,
         expansion_ratio=4,
         dropout=0.1,
-        activation='relu',
+        activation='gelu',
         dilation=1,
         drop_path=0.0,
-        layer_scale_init_value=0.0,
+        layer_scale_init_value=0.00,
         **kwargs,
     ):
         super().__init__()
@@ -133,6 +138,12 @@ class ConvNeXt1DBlock(nn.Module):
             dilation=dilation,
         )
         self.norm = nn.LayerNorm(dim)
+
+        self.exp = nn.Linear(dim, hidden_dim)
+        self.activation = activation_fn()
+        self.grn = GRN(hidden_dim)
+        self.cmp = nn.Linear(hidden_dim, dim)
+        self.dropout = nn.Dropout(dropout)
 
         self.pw = nn.Sequential(
             nn.Linear(dim, hidden_dim),
@@ -151,9 +162,14 @@ class ConvNeXt1DBlock(nn.Module):
         res = x
         x = self.dw(x.transpose(1, 2)).transpose(1, 2)
         x = self.norm(x)
-        x = self.pw(x)
-        if gamma is not None:
+        x = self.exp(x)
+        x = self.activation(x)
+        x = self.grn(x, mask=mask)
+        x = self.cmp(x)
+        x = self.dropout(x)
+        if self.gamma is not None:
             x = self.gamma * x
+        x = x * mask if mask is not None else x
         return res + self.drop_path(x)
 
 

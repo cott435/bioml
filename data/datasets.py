@@ -4,6 +4,8 @@ from .pre_embed import MultiSequenceDS, SingleSequenceDS
 import numpy as np
 import h5py
 import matplotlib.pyplot as plt
+import lmdb
+from tqdm.auto import tqdm
 
 class ESMCSingleDS(SingleSequenceDS):
 
@@ -49,6 +51,19 @@ class ESMCSingleDS(SingleSequenceDS):
 
     def __len__(self):
         return len(self.data)
+
+    def to_lmdb(self):
+        new_path = self.file_path.parent / f'{self.file_path.stem}.lmdb'
+        env = lmdb.open(str(new_path), map_size=1 << 40)  # 1 TB limit – adjust as needed
+
+        with env.begin(write=True) as txn:
+            with h5py.File(self.file_path, "r") as f:  # or your generator
+                keys = list(f.keys())  # or protein IDs
+                for i, key in tqdm(enumerate(keys)):
+                    emb = f[key][:]  # numpy array from H5
+                    # Store as raw bytes + shape (zero-copy, fastest)
+                    value = np.array([emb.shape[0], emb.shape[1]], dtype=np.int64).tobytes() + emb.tobytes()
+                    txn.put(key.encode('utf-8'), value)
 
     def save_full_embedding(self, float16=True):
         emb_list = []
@@ -98,7 +113,35 @@ class ESMCSingleDS(SingleSequenceDS):
         plt.title(f"Protein {idx}")
         plt.show()
 
+class ESMLMDBDataset(SingleSequenceDS, torch.utils.data.Dataset):
 
+    def __init__(self, data_name, model_name, cluster_coef=0.5, column_map=None, save_dir=data_dir,
+                 force=False, missing='remove', max_len=5000):
+        super().__init__(data_name, cluster_coef=cluster_coef, column_map=column_map, save_dir=save_dir, force=force)
+        self.file_path = self.base_dir / model_name / f'{model_name}_embeddings.lmdb'
+        self.env = lmdb.open(str(self.file_path), readonly=True, lock=False, readahead=False)
+        self.ids = self.data["ID"].to_numpy()
+        self.labels = self.data["Y"].to_list()
+        with self.env.begin() as txn:
+            shape_bytes = txn.get(self.ids[0].encode('utf-8'))[:16]
+            self.length = txn.stat()["entries"]
+            self.embed_dim = np.frombuffer(shape_bytes, dtype=np.int64)[-1]
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        with self.env.begin() as txn:
+            data = txn.get(self.ids[idx].encode('utf-8'))
+        if data is None:
+            raise KeyError(f"Protein {self.ids[idx]} not found")
+        shape = np.frombuffer(data[:16], dtype=np.int64)
+        emb = np.frombuffer(data[16:], dtype=np.float32).reshape(shape).copy()
+        emb = torch.from_numpy(emb)
+        active_sites = np.array(self.labels[idx], copy=True)
+        y = torch.zeros(emb.shape[0], dtype=torch.float32)
+        y.index_fill_(0, torch.tensor(active_sites), 1)
+        return emb, y
 
 class PackedSequenceDataset(SingleSequenceDS, torch.utils.data.Dataset):
 

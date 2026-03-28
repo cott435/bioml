@@ -57,14 +57,28 @@ class ConvNeXtTelemetry:
         self.backward_stats: Dict[str, Dict[str, List[float]]] = defaultdict(
             lambda: defaultdict(list)
         )
+        self.stack_stats = defaultdict(list)
 
         for name, module in model.named_modules():
             if isinstance(module, (ConvNeXt1DBlock, ResConvFFN)):
                 self.blocks[name] = module
 
         self.enabled = writer is not None and len(self.blocks) > 0
+        self.stack_hook = model.stack.register_forward_hook(self.simple_forward)
         if self.enabled:
             self._attach_hooks()
+
+    def simple_forward(self, module, inputs, output):
+        if not module.training:
+            return
+
+        stats = self.stack_stats['input']
+        if sum(len(s) for s in stats) < 3000000:
+            stats.append(inputs[0].detach().cpu().numpy().flatten())
+        stats = self.stack_stats['output']
+        if sum(len(s) for s in stats) < 2000000:
+            stats.append(output.detach().cpu().numpy().flatten())
+
 
     def _attach_hooks(self) -> None:
         for name, module in self.blocks.items():
@@ -156,6 +170,13 @@ class ConvNeXtTelemetry:
         if step % self.log_every_steps != 0:
             return
 
+        for name, data in self.stack_stats.items():
+            data = np.concatenate(data)
+            self.writer.add_histogram(f'Stack/{name}', data, step)
+
+        self.writer.add_histogram('Model/out_proj_weights',
+                                  self.model.out_proj.weight.detach().cpu().numpy().flatten(), step)
+
         for block_name, block in self.blocks.items():
             fwd = self.forward_stats.get(block_name, {})
             bwd = self.backward_stats.get(block_name, {})
@@ -175,6 +196,7 @@ class ConvNeXtTelemetry:
     def _clear_buffers(self) -> None:
         self.forward_stats.clear()
         self.backward_stats.clear()
+        self.stack_stats.clear()
 
     def close(self) -> None:
         for handle in self.handles:

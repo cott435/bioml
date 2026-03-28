@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from data.sampling import SortedTokenBatchSampler
 from data.utils import bucket_collate_fn
-from training import EPTrainer
+from training import TokenTrainer
 
 
 class Tester:
@@ -62,11 +62,11 @@ class Tester:
 
     def evaluate_split(self, split: str = 'val', max_tokens: int | None = None):
         loader = self.build_loader(split=split, max_tokens=max_tokens)
-        labels, logits, losses, batch_losses = EPTrainer.collect_outputs(
+        labels, logits, losses, batch_losses = TokenTrainer.collect_outputs(
             self.model, loader, self.criterion, self.device
         )
         probs = torch.sigmoid(torch.from_numpy(logits)).numpy()
-        score, metrics = EPTrainer.compute_val_metric(probs, labels)
+        score, metrics = TokenTrainer.compute_val_metric(probs, labels)
         avg_loss = float(np.mean(batch_losses)) if len(batch_losses) else float('nan')
         metrics['Loss'] = avg_loss
         """
@@ -101,7 +101,7 @@ class Tester:
         return {key: data[key] for key in data.files}
 
     def predict(self, loader: DataLoader):
-        _, logits, _, _ = EPTrainer.collect_outputs(
+        _, logits, _, _ = TokenTrainer.collect_outputs(
             self.model, loader, self.criterion, self.device
         )
         return logits

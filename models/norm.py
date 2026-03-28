@@ -13,7 +13,7 @@ class MaskedInstanceNorm1d(nn.Module):
         affine: whether to use learnable scale and bias
     """
 
-    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=False, compress_tails=False):
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, compress_tails=False):
         super().__init__()
         self.num_features = num_features
         self.eps = eps
@@ -64,7 +64,7 @@ class MaskedInstanceNorm1d(nn.Module):
 
             x_norm = (x - mean) / torch.sqrt(var + self.eps)
         if self.compress_tails:
-            x_norm = exponential_tail_compress(x_norm, threshold=3.0, alpha=1.5)
+            x_norm = exponential_tail_compress(x_norm, threshold=4.0, alpha=1.5)
         if self.affine:
             x_norm = x_norm * self.weight.view(1, -1, 1) + self.bias.view(1, -1, 1)
 

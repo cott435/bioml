@@ -12,6 +12,7 @@ import torch
 from sklearn.model_selection import GroupShuffleSplit
 from multiprocessing import cpu_count
 from .losses import DynamicBinaryFocalLoss, BinaryFocalLoss, BCELoss
+from .optim_ import TokenOptimizer
 
 
 class TrainingPipeline:
@@ -104,12 +105,12 @@ class TrainingPipeline:
             iterator._shutdown_workers()
             loader._iterator = None
 
-    def _get_loss_criterion(self, loss_selection, pos_weight=10):
+    def _get_loss_criterion(self, loss_selection, pos_weight=10, alpha=0.25, gamma=2):
         if loss_selection == 'BCE':
             pos_weight = torch.tensor([pos_weight], device=self.device)
             loss_criterion = BCELoss(reduction='none', pos_weight=pos_weight)
         elif loss_selection == 'focal':
-            loss_criterion = BinaryFocalLoss()
+            loss_criterion = BinaryFocalLoss(alpha=alpha, gamma=gamma)
         else:
             raise NotImplementedError
         return loss_criterion
@@ -128,11 +129,11 @@ class TrainingPipeline:
             json.dump(params, f, indent=2)
         self._save_split_indices(data_dir)
         max_tokens = params.pop("max_tokens", 10000)
-        loss_selection = params.pop("loss_selection", 'BCE')
-        pos_weight = params.pop("pos_weight", 10)
-        trainer_kwargs = {k: v for k, v in params.items() if k in self.trainer_class.__init__.__code__.co_varnames}
-        model_kwargs = {k: v for k, v in params.items() if k not in trainer_kwargs}
 
+        loss_kwargs = {k: v for k, v in params.items() if k in TrainingPipeline._get_loss_criterion.__code__.co_varnames}
+        optim_kwargs = {k: v for k, v in params.items() if k in TokenOptimizer.__init__.__code__.co_varnames}
+        trainer_kwargs = {k: v for k, v in params.items() if k in self.trainer_class.__init__.__code__.co_varnames}
+        model_kwargs = {k: v for k, v in params.items() if k not in trainer_kwargs and k not in optim_kwargs and k not in loss_kwargs}
 
         train_loader = train_eval_loader = val_loader = None
         model = None
@@ -144,15 +145,19 @@ class TrainingPipeline:
                 **model_kwargs,
                 final_bias=self.final_bias
             )
-
-            loss_criterion = self._get_loss_criterion(loss_selection, pos_weight)
-
-            trainer_extra = {}
             if 'train_eval_loader' in signature(self.trainer_class.__init__).parameters:
-                trainer_extra['train_eval_loader'] = train_eval_loader
+                trainer_kwargs['train_eval_loader'] = train_eval_loader
+
+            loss_criterion = self._get_loss_criterion(**loss_kwargs)
+            optimizer = TokenOptimizer(
+                model,
+                self.epochs * len(train_loader),
+                **optim_kwargs,
+            )
 
             trainer = self.trainer_class(
                 model,
+                optimizer,
                 loss_criterion,
                 train_loader,
                 val_loader,
@@ -161,7 +166,6 @@ class TrainingPipeline:
                 log_dir=log_dir,
                 data_dir=data_dir,
                 epochs=self.epochs,
-                **trainer_extra,
                 **trainer_kwargs,
             )
 

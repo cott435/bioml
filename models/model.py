@@ -44,8 +44,8 @@ class Stack1D(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear, nn.Conv1d)):
-            feats = m.in_features if hasattr(m, 'in_features') else m.in_channels
-            trunc_normal_(m.weight, std=feats**-0.5)
+            #feats = m.in_features if hasattr(m, 'in_features') else m.in_channels
+            trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
@@ -58,7 +58,7 @@ class Stack1D(nn.Module):
 class TokenActivationHead(nn.Module):
 
     def __init__(self, in_dim, out_dim=1, hidden_dim=None, final_bias=0,
-                 feature_dropout=None, token_dropout=None, inp_norm='batch', **kwargs):
+                 feature_dropout=None, token_dropout=None, inp_norm='instance', **kwargs):
         super().__init__()
         assert inp_norm is None or inp_norm in norms
 
@@ -66,21 +66,24 @@ class TokenActivationHead(nn.Module):
         self.feature_dropout = nn.Dropout1d(feature_dropout) if feature_dropout else nn.Identity()
         self.token_dropout = nn.Dropout1d(token_dropout) if token_dropout else nn.Identity()
         self.in_proj = nn.Linear(in_dim, hidden_dim) if hidden_dim else nn.Identity()
+        self.proj_norm = nn.LayerNorm(hidden_dim)
         hidden_dim = hidden_dim or in_dim
 
         self.stack = Stack1D(hidden_dim, **kwargs)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
 
-        self._init_weights(final_bias)
+        self._init_weights()
+        # just subtract final bias and keep param bias at 0 to avoid weight decay issues
+        self.final_bias = final_bias
 
-    def _init_weights(self, final_bias):
+    def _init_weights(self):
         if isinstance(self.in_proj, nn.Linear):
             nn.init.kaiming_normal_(self.in_proj.weight, mode='fan_in', nonlinearity='linear')
             if self.in_proj.bias is not None:
                 nn.init.zeros_(self.in_proj.bias)
-        #nn.init.normal_(self.out_proj.weight, std=0.01)
-        nn.init.kaiming_normal_(self.out_proj.weight, mode='fan_in', nonlinearity='linear')
-        nn.init.constant_(self.out_proj.bias, final_bias)
+        nn.init.normal_(self.out_proj.weight, std=0.01)
+        #nn.init.kaiming_normal_(self.out_proj.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.zeros_(self.out_proj.bias)
 
 
     def forward_(self, embeds, mask=None, sigmoid=False):
@@ -95,7 +98,7 @@ class TokenActivationHead(nn.Module):
 
         mask = mask.unsqueeze(-1) if mask is not None else None
         x = self.stack(x, mask=mask)
-        x = self.out_proj(x).squeeze(-1)
+        x = self.out_proj(x).squeeze(-1) + self.final_bias
         return torch.sigmoid(x) if sigmoid else x
 
     def forward(self, embeds, mask=None, sigmoid=False):
@@ -103,9 +106,10 @@ class TokenActivationHead(nn.Module):
         x = self.token_dropout(x)
         x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
         x = self.in_proj(x)
+        x = self.proj_norm(x)
         mask = mask.unsqueeze(-1) if mask is not None else None
         x = self.stack(x, mask=mask)
-        x = self.out_proj(x).squeeze(-1)
+        x = self.out_proj(x).squeeze(-1) + self.final_bias
         return torch.sigmoid(x) if sigmoid else x
 
 class SequenceInteractionHead(nn.Module):

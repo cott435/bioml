@@ -27,13 +27,15 @@ class BCELoss(nn.Module):
 
 
 class BinaryFocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='none', smoothing=True):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.smoothing = smoothing
 
     def forward(self, logits, targets, mask=None):
+        targets = targets.clip(0, 0.9) if self.smoothing else targets
         bce_loss = F.binary_cross_entropy_with_logits(
             logits, targets.float(), reduction='none'
         )

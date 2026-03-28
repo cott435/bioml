@@ -9,26 +9,23 @@ from torch.utils.data import DataLoader
 from .logging_ import ConvNeXtTelemetry
 import optuna
 from collections import defaultdict
-from .schedulers import get_cosine_scheduler
+from .optim_ import TokenOptimizer
+import time
 
 
-class EPTrainer:
+class TokenTrainer:
     """Handles training, validation, and logging for one run (single split or fold)."""
     def __init__(
             self,
             model,
+            optimizer: TokenOptimizer,
             loss_criterion,
             train_loader: DataLoader,
             val_loader: DataLoader,
             train_eval_loader: DataLoader | None = None,
             device: torch.device | str = 'cpu',
-            lr_restarts = False,
-            backbone_lr_ratio = 0.1,
-            base_lr=1e-4,
-            warmup_len=0.2,
             epochs=10,
             max_norm=None,
-            weight_decay=0.01,
             jitter = 0.0,
             ckpt_dir=None,
             log_dir=None,
@@ -38,15 +35,8 @@ class EPTrainer:
         self.model = model.to(self.device)
         self.train_loader, self.val_loader = train_loader, val_loader
         self.train_eval_loader = train_eval_loader or train_loader
-
-        self.optimizer = torch.optim.AdamW([
-                {"params": model.stack.parameters(), "lr": base_lr},
-                {"params": model.inp_norm.parameters(), "lr": base_lr},
-                {"params": model.in_proj.parameters(), "lr": base_lr * backbone_lr_ratio},
-                {"params": model.out_proj.parameters(), "lr": base_lr * backbone_lr_ratio},
-            ], weight_decay=weight_decay)
-        total_steps = epochs * len(train_loader)
-        self.scheduler = get_cosine_scheduler(self.optimizer, total_steps, warmup_len=warmup_len, use_restarts=lr_restarts)
+        self.optimizer = optimizer
+        self.scheduler = optimizer.scheduler
         self.criterion = loss_criterion
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
@@ -121,7 +111,6 @@ class EPTrainer:
             loss = self._accumulate_grads(batch) if accumulate else self._get_grads(batch)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
-            self.scheduler.step()
             self.criterion.step()
             self.log_loss(loss, self.total_steps, 'Training')
             self.log_training_step(grad_norm.item())
@@ -129,6 +118,7 @@ class EPTrainer:
             loop.set_postfix(loss=loss)
             total_loss += loss
         return total_loss / len(self.train_loader)
+
 
     def _get_grads(self, batch):
         embeds, labels, mask = (t.to(self.device) for t in batch)
@@ -276,15 +266,13 @@ class EPTrainer:
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
             'best_metric': float(self.best_metric)
         }, path)
 
     def from_checkpoint(self, path):
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['token_optimizer_state_dict'])
         self.best_metric = checkpoint.get('best_metric', 0.0)
 
     @staticmethod
@@ -294,6 +282,8 @@ class EPTrainer:
         mcc = matthews_corrcoef(labels, preds)
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='binary', zero_division=0)
         return auprc, {"AUPRC": auprc, "MCC": mcc, "F1": f1}
+
+
 
 
 class Trainer:

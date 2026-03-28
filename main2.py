@@ -1,8 +1,8 @@
 from pathlib import Path
-from data import ESMCSingleDS, PackedSequenceDataset
+from data import ESMCSingleDS, PackedSequenceDataset, ESMLMDBDataset
 from models import TokenActivationHead
 import torch
-from training import OptunaSearch, TrainingPipeline, EPTrainer, SinglePipeline, GridSearch
+from training import OptunaSearch, TrainingPipeline, TokenTrainer, SinglePipeline, GridSearch
 from training.params import ModelParamSpace, TrainerParamSpace
 import numpy as np
 
@@ -12,22 +12,25 @@ base_data_dir = Path.cwd() / 'data' / 'data_files'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
 #dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+#dataset.to_lmdb()
+
 #dataset.save_full_embedding()
-dataset = PackedSequenceDataset(data_name, model_name, save_dir=base_data_dir)
+dataset = ESMLMDBDataset(data_name, model_name, save_dir=base_data_dir)
+
 
 results_dir = Path.cwd() / 'experiments'
 model_param_space = ModelParamSpace(hidden_dim=128, activation='gelu', layers=5, kernel_size=3, expansion_ratio=2, block_type='ConvNeXt1DBlock')
 trainer_param_space = TrainerParamSpace(max_tokens=30000, gamma=2, alpha=0.5)
 
-pipeline = TrainingPipeline(dataset, TokenActivationHead, EPTrainer, device=device, epochs=40, small_batch=200, stop_overfit=False)
+pipeline = TrainingPipeline(dataset, TokenActivationHead, TokenTrainer, device=device, epochs=40, small_batch=100, stop_overfit=False)
 
-params = {'hidden_dim': 128, 'base_lr': [3e-3, 6e-3], 'kernel_size': 3, 'inp_norm': 'instance',
-          'dropout': 0.2, "layers": 4, 'weight_decay': 0.01, 'pos_weight': [1, 5, 10, 20],
-          'jitter': 0.000, 'warmup_len': 0.2, 'token_dropout':0.15, 'feature_dropout': 0.2,
-          'max_tokens': 60000, 'max_norm': 0.5, 'block_type': ['ResConvFFN', 'ConvNeXt1DBlock']}
+params = {'max_tokens': 60000, 'hidden_dim': 80, 'layers':3, 'max_norm': 0.5, 'inp_norm': None,
+          'feature_dropout': 0.2, 'dropout': 0.2, 'weight_decay': 0.03, 'token_dropout':0.2, 'drop_path': 0.2,
+          'pos_weight': 3, 'base_lr': [1e-3, 4e-3], 'out_lr_ratio': [0.1, 0.05], 'in_lr_ratio': [0.2, 0.05],
+          'loss_selection': 'focal'
+         }
 
-
-ss = GridSearch(pipeline, params, 'test_batch_200', base_save_dir=results_dir)
+ss = GridSearch(pipeline, params, 'V2_100 batch', base_save_dir=results_dir)
 
 ss.optimize()
 
@@ -57,3 +60,6 @@ sns.scatterplot(data=df, x="params.gamma", y="train_score")
 """
 See my scrpts/IEDB_Jespersen.ipynb to see the structure of embedding my data. I need to parse it and pre_embed it and then main.py to see how to run the training pipeline. I build it all for a single sequence dataset where there is one x for each y. Now I want to use pre_embed.MultiSequenceDS to do my training where there will be 2 x for each y. Modify ESMCSingleDS so that two can be handled. For the multi sequence dataset, it is only y=1 if the two proteins interact and all data values are y=1 so the data.sampler.ClusterPairSplitter must be able to cluster the data and resample. Find a way to work this since it will be adding data to the original dataset. Maybe it need modified. In trainers.py build a base trainer and two child classes for each training type if needed. Do not modify my models. I only want you working or data and training logic. Assume the loss function can handle the x and y and masks. Make things modular. The multi should inherit from the singles or both from a base for the datasets and trainers
 """
+
+
+
