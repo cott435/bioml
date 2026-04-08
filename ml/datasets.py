@@ -38,7 +38,7 @@ class ESMCTokenFrameBuilder(BaseTokenFrameBuilder):
     Flattens sequence-level embeddings into token-level rows.
     """
 
-    def build(self, max_tokens: int | None = None) -> TokenizedMLDataset:
+    def build(self, max_tokens: int | None = None, rolling_ave=None) -> TokenizedMLDataset:
         if max_tokens is not None and max_tokens <= 0:
             raise ValueError("max_tokens must be > 0 when provided.")
         if "ID" not in self.dataset.data.columns or "cluster" not in self.dataset.data.columns:
@@ -72,6 +72,15 @@ class ESMCTokenFrameBuilder(BaseTokenFrameBuilder):
                 raise ValueError(f"Expected embedding shape (seq_len, dim), got {emb_np.shape}")
             if y_np.ndim != 1 or y_np.shape[0] != emb_np.shape[0]:
                 raise ValueError(f"Label shape {y_np.shape} does not match embedding length {emb_np.shape[0]}.")
+
+            if rolling_ave is not None:
+                pad = rolling_ave // 2
+                padded = np.pad(emb_np, ((pad, pad), (0, 0)), mode='edge')
+
+                cumsum = np.cumsum(padded, axis=0)
+                cumsum = np.vstack([np.zeros((1, emb_np.shape[1])), cumsum])
+
+                emb_np = (cumsum[rolling_ave:] - cumsum[:-rolling_ave]) / rolling_ave
 
             token_idx = np.arange(emb_np.shape[0], dtype=np.int32)
             if remaining is not None and emb_np.shape[0] > remaining:

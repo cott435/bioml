@@ -11,6 +11,8 @@ import optuna
 from collections import defaultdict
 from .optim_ import TokenOptimizer
 import time
+from models import TokenActivationHead
+import matplotlib.pyplot as plt
 
 
 class TokenTrainer:
@@ -66,6 +68,7 @@ class TokenTrainer:
                 train_val_score = self.evaluate_epoch(self.train_eval_loader, epoch, self.train_metrics, prefix='TrainMetrics')
                 score = self.evaluate_epoch(self.val_loader, epoch, self.val_metrics, prefix='ValMetrics')
                 train_score = max(train_score, train_val_score)
+                self._save_logit_plot(epoch)
                 if score > self.best_metric:
                     self.best_metric = score
                     self.save_checkpoint('best_model.pth')
@@ -111,7 +114,6 @@ class TokenTrainer:
             loss = self._accumulate_grads(batch) if accumulate else self._get_grads(batch)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
-            self.criterion.step()
             self.log_loss(loss, self.total_steps, 'Training')
             self.log_training_step(grad_norm.item())
             self.total_steps += 1
@@ -133,13 +135,14 @@ class TokenTrainer:
     def _accumulate_grads(self, batch):
         accumulated_loss = 0
         total_valid_tokens = sum([s[2].sum().item() for s in batch])
+        total_b = sum([len(s[0]) for s in batch])
         for embeds, targets, mask in batch:
             embeds, targets, mask = embeds.to(self.device), targets.to(self.device), mask.to(self.device)
             noise = torch.randn_like(embeds) * self.jitter
             embeds = embeds + noise
             logits = self.model(embeds, mask=mask)
             loss = self.criterion(logits, targets, mask=mask)
-            seq_loss = loss.sum() / total_valid_tokens
+            seq_loss = loss.sum() / total_b
             seq_loss.backward()
             accumulated_loss += seq_loss.item()
         return accumulated_loss
@@ -163,9 +166,10 @@ class TokenTrainer:
         self.log_loss(avg_loss, epoch, name)
         pos, neg = labels == 1, labels == 0
         pos_logits, neg_logits = logits[pos], logits[neg]
-        pos_loss, neg_loss = losses[pos].sum(), losses[neg].sum()
-        self.log_loss(pos_loss, epoch, f'{name}/PositiveLoss')
-        self.log_loss(neg_loss, epoch, f'{name}/NegativeLoss')
+        if len(losses) == len(labels):
+            pos_loss, neg_loss = losses[pos].sum(), losses[neg].sum()
+            self.log_loss(pos_loss, epoch, f'{name}/PositiveLoss')
+            self.log_loss(neg_loss, epoch, f'{name}/NegativeLoss')
         self.log_hist(pos_logits, epoch, f'{name}/PositiveLogits')
         self.log_hist(neg_logits, epoch, f'{name}/NegativeLogits')
         self.log_metrics({
@@ -190,7 +194,10 @@ class TokenTrainer:
 
                 all_logits.extend(torch.masked_select(logits, mask).detach().cpu().numpy())
                 all_labels.extend(torch.masked_select(labels, mask).detach().cpu().numpy())
-                all_losses.extend(torch.masked_select(loss, mask).detach().cpu().numpy())
+                if loss.shape==mask.shape:
+                    all_losses.extend(torch.masked_select(loss, mask).detach().cpu().numpy())
+                else:
+                    all_losses.extend(loss.detach().cpu().numpy())
             else:
                 for sub_batch in batch:
                     iter_batch(sub_batch)
@@ -233,16 +240,17 @@ class TokenTrainer:
         self.log_metrics(items, self.total_steps)
         #self.log_metrics(self.criterion.get_current_params(), self.total_steps, prefix='LossWeights')
 
-        gammas = [
-            layer.pw[2].gamma
-            for layer in self.model.stack.stack
-            if hasattr(layer, 'pw') and len(layer.pw) > 2 and hasattr(layer.pw[2], 'gamma')
-        ]
-        if gammas and gammas[0] is not None and self.total_steps % 10 == 0:
-            gamma_tensor = torch.stack(gammas, dim=0).float()
-            self.log_metrics({'Model/GammaStd': gamma_tensor.std().item()}, self.total_steps)
-        if self.model_telemetry:
-            self.model_telemetry.log_step(self.total_steps)
+        if isinstance(self.model, TokenActivationHead):
+            gammas = [
+                layer.grn.gamma
+                for layer in self.model.stack.stack
+                if hasattr(layer, 'grn')
+            ]
+            if gammas and gammas[0] is not None and self.total_steps % 10 == 0:
+                gamma_tensor = torch.stack(gammas, dim=0).float()
+                self.log_metrics({'Model/GammaStd': gamma_tensor.std().item()}, self.total_steps)
+            if self.model_telemetry:
+                self.model_telemetry.log_step(self.total_steps)
 
     def log_loss(self, value, step, name):
         self.log_metrics({f'Loss/{name}': value}, step)
@@ -258,6 +266,47 @@ class TokenTrainer:
             if isinstance(data, torch.Tensor):
                 data = data.detach().cpu().numpy().flatten()
             self.writer.add_histogram(name, data, step)
+
+    def _save_logit_plot(self, epoch):
+        total = min(5, len(self.train_loader.dataset))
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=False)
+
+        for ax, ds, title in [
+            (ax1, self.train_loader.dataset, 'Train'),
+            (ax2, self.val_loader.dataset, 'Validation'),
+        ]:
+            losses = []
+            lengths = []
+            labels = []
+            all_logits = []
+            with torch.no_grad():
+                for i in range(total):
+                    x, y = ds[i]
+                    logits = self.model(x.unsqueeze(0).to(self.device))
+                    loss = self.criterion(logits, y.unsqueeze(0).to(self.device))
+                    losses.append(loss.detach().cpu().numpy().round(3).item())
+                    labels.extend(y.detach().cpu().numpy())
+                    all_logits.extend(logits.detach().cpu().numpy()[0])
+                    lengths.append(len(y))
+            labels = np.array(labels)
+            all_logits = np.array(all_logits)
+            neg = labels == 0
+            pos = labels == 1
+
+            ax.scatter(np.where(neg)[0], all_logits[neg], c='tab:blue', s=10, alpha=0.5, label='neg')
+            ax.scatter(np.where(pos)[0], all_logits[pos], c='tab:red', s=10, alpha=0.5, label='pos')
+            ax.axhline(0, color='gray', linestyle='--', linewidth=0.5)
+            for l in np.array(lengths).cumsum():
+                ax.axvline(x=l, color='gray', linestyle='--', linewidth=0.5)
+            ax.set_ylabel('logit')
+            losses = [f'{l: .4f}' for l in losses]
+            ax.set_title(f'{title} Loss: {';'.join(losses)}')
+            ax.legend()
+
+        plt.tight_layout()
+        plt.savefig(self.data_dir / f'epoch{epoch}.png', dpi=150, bbox_inches='tight')
+        plt.close()
+
 
     def save_checkpoint(self, filename="checkpoint.pth"):
         if not self.ckpt_dir:

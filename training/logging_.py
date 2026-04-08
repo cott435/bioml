@@ -64,9 +64,10 @@ class ConvNeXtTelemetry:
                 self.blocks[name] = module
 
         self.enabled = writer is not None and len(self.blocks) > 0
-        self.stack_hook = model.stack.register_forward_hook(self.simple_forward)
+
         if self.enabled:
             self._attach_hooks()
+            self.stack_hook = model.stack.register_forward_hook(self.simple_forward)
 
     def simple_forward(self, module, inputs, output):
         if not module.training:

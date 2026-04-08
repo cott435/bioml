@@ -5,10 +5,11 @@ from .blocks import (
     ConvNeXt1DBlock,
     ConvFFN,
     ResConvFFN,
-    PreActResNet1DBlock,
+    PreActResNet1DBlock
 )
 from timm.layers import trunc_normal_
 from .norm import MaskedInstanceNorm1d, MaskedBatchNorm1d
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 blocks = {
     'Conv1dInvBottleNeck': Conv1dInvBottleNeck,
@@ -68,6 +69,7 @@ class TokenActivationHead(nn.Module):
         self.in_proj = nn.Linear(in_dim, hidden_dim) if hidden_dim else nn.Identity()
         self.proj_norm = nn.LayerNorm(hidden_dim)
         hidden_dim = hidden_dim or in_dim
+        #self.gelu = nn.GELU()
 
         self.stack = Stack1D(hidden_dim, **kwargs)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
@@ -85,32 +87,108 @@ class TokenActivationHead(nn.Module):
         #nn.init.kaiming_normal_(self.out_proj.weight, mode='fan_in', nonlinearity='linear')
         nn.init.zeros_(self.out_proj.bias)
 
-
-    def forward_(self, embeds, mask=None, sigmoid=False):
-        x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
-        x_norm = x
-        x_proj = self.in_proj(x)
-
-        x = self.token_dropout(x)
-        x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
-        x = self.in_proj(x)
-
-
-        mask = mask.unsqueeze(-1) if mask is not None else None
-        x = self.stack(x, mask=mask)
-        x = self.out_proj(x).squeeze(-1) + self.final_bias
-        return torch.sigmoid(x) if sigmoid else x
-
     def forward(self, embeds, mask=None, sigmoid=False):
         x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
         x = self.token_dropout(x)
         x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
         x = self.in_proj(x)
+        #x = self.gelu(x)
         x = self.proj_norm(x)
         mask = mask.unsqueeze(-1) if mask is not None else None
         x = self.stack(x, mask=mask)
         x = self.out_proj(x).squeeze(-1) + self.final_bias
         return torch.sigmoid(x) if sigmoid else x
+
+class SequenceActiveSiteCRF(nn.Module):
+
+    def __init__(self, in_dim, hidden_dim=None, tags=2,
+                 feature_dropout=None, token_dropout=None, inp_norm='instance', **kwargs):
+        super().__init__()
+        self.model = TokenActivationHead(in_dim, out_dim=2, hidden_dim=hidden_dim, feature_dropout=feature_dropout,
+                                         token_dropout=token_dropout, inp_norm=inp_norm, **kwargs)
+
+class TokenActivationLSTM(nn.Module):
+    def __init__(self, in_dim, hidden_dim=256, layers=2, dropout=0.3, inp_norm='instance', final_bias=0, **kwargs):
+        super().__init__()
+
+        assert inp_norm is None or inp_norm in norms
+
+        self.inp_norm = norms[inp_norm](in_dim) if inp_norm is not None else None
+
+        self.in_proj = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(dropout)
+        )
+
+        self.stack = nn.LSTM(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim // 2,
+            num_layers=layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if layers > 1 else 0
+        )
+
+        self.dropout = nn.Dropout(dropout)
+        self.out_proj = nn.Linear(hidden_dim, 1)
+        self._init_weights()
+        self.final_bias = final_bias
+
+    def _init_weights(self):
+        if isinstance(self.in_proj[0], nn.Linear):
+            nn.init.kaiming_normal_(self.in_proj[0].weight, mode='fan_in', nonlinearity='linear')
+            if self.in_proj[0].bias is not None:
+                nn.init.zeros_(self.in_proj[0].bias)
+        for name, param in self.stack.named_parameters():
+            if "weight_ih" in name:
+                nn.init.xavier_uniform_(param)
+            elif "weight_hh" in name:
+                nn.init.orthogonal_(param)
+            elif "bias" in name:
+                nn.init.zeros_(param)
+                n = param.size(0)
+                param.data[n // 4:n // 2].fill_(1.0)
+        nn.init.normal_(self.out_proj.weight, std=0.01)
+        nn.init.zeros_(self.out_proj.bias)
+
+
+    def forward(self, embeds, mask=None):
+
+        x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
+        x = self.in_proj(x)  # (B, S, hidden_dim)
+
+        if mask is not None:
+            lengths = mask.sum(dim=1).cpu()
+
+            packed_x = pack_padded_sequence(
+                x,
+                lengths,
+                batch_first=True,
+                enforce_sorted=False
+            )
+        else:
+            packed_x = x
+
+        lstm_out, _ = self.stack(packed_x)  # (B, S, hidden_dim)
+
+        if mask is not None:
+            lstm_out, _ = pad_packed_sequence(
+                lstm_out,
+                batch_first=True,
+                total_length=lengths.max()
+            )
+        lstm_out = self.dropout(lstm_out)
+        logits = self.out_proj(lstm_out).squeeze(-1) + self.final_bias  # (B, S)
+
+        if mask is not None:
+            logits = logits * mask
+
+        return logits
+
+
+
 
 class SequenceInteractionHead(nn.Module):
 

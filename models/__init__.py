@@ -1,1 +1,1 @@
-from .model import TokenActivationHead
+from .model import TokenActivationHead, TokenActivationLSTM

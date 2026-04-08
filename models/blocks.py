@@ -1,4 +1,3 @@
-from sympy import gamma
 from torch import nn as nn, Tensor
 import torch
 from timm.layers import DropPath
@@ -24,13 +23,13 @@ class GRN(nn.Module):
 
     def __init__(self, dim):
         super().__init__()
-        self.gamma = nn.Parameter(torch.zeros(1, 1, dim))
+        self.gamma = nn.Parameter(torch.randn(1, 1, dim) * 1e-2)
         self.beta = nn.Parameter(torch.zeros(1, 1, dim))
 
     def forward(self, x, mask=None):
         if mask is not None:
             x = x * mask
-        gx = torch.norm(x, p=2, dim=1, keepdim=True)
+        gx = (x.pow(2).sum(dim=1, keepdim=True) + 1e-6).sqrt()
         nx = gx / (gx.mean(dim=-1, keepdim=True) + 1e-6)
         out = self.gamma * (x * nx) + self.beta + x
         if mask is not None:
@@ -109,7 +108,10 @@ class ResConvFFN(nn.Module):
             if layer_scale_init_value > 0 else None)
 
     def forward(self, x, mask=None):
-        return x + self.drop_path(self.gamma * self.ff(x, mask=mask))
+        block = self.ff(x, mask=mask)
+        if self.gamma is not None:
+            block = self.gamma * block
+        return x + self.drop_path(block)
 
 
 class ConvNeXt1DBlock(nn.Module):
@@ -145,13 +147,6 @@ class ConvNeXt1DBlock(nn.Module):
         self.cmp = nn.Linear(hidden_dim, dim)
         self.dropout = nn.Dropout(dropout)
 
-        self.pw = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            activation_fn(),
-            GRN(hidden_dim),
-            nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout),
-        )
         self.gamma = (
             nn.Parameter(layer_scale_init_value * torch.ones((1, dim, 1)), requires_grad=True)
             if layer_scale_init_value > 0 else None)
