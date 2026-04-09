@@ -170,4 +170,18 @@ class PackedSequenceDataset(SingleSequenceDS, torch.utils.data.Dataset):
         return emb, y
 
 
+"""
+I want to overhaul my data processing pipeline to simlify it. Anything can be edited to improve efficiency.
+My structure has a full pipeline start with a sequence of a protein and a Y.
+    First it must create a fasta and save the file
+    Then it must cluster them based on a coef and then save the file.
+    Then embed the sequence in embedder of choice and save to file. I want option to do h5 and lmdb with lmdb as default    
+        I want to be able to embed all embeddings and hidden states. 
+        I plan to start using hidden states in my models and will beed to be able to select which ones I want
+        This should be efficient with memory and speed.
+    This can be lazy, and where the file is found, use it. 
 
+Then I also need my datasets which are mainly build, may need cleaned up. The inheritance structure does not flow well, I want this improved.
+    pre_embed.py also needs the inheritance improved, this should all flow well together
+    
+"""

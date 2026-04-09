@@ -108,12 +108,15 @@ class SequenceActiveSiteCRF(nn.Module):
                                          token_dropout=token_dropout, inp_norm=inp_norm, **kwargs)
 
 class TokenActivationLSTM(nn.Module):
-    def __init__(self, in_dim, hidden_dim=256, layers=2, dropout=0.3, inp_norm='instance', final_bias=0, **kwargs):
+    def __init__(self, in_dim, hidden_dim=256, layers=2, dropout=0.3, inp_norm='instance',
+                 final_bias=0,feature_dropout=None, token_dropout=None, **kwargs):
         super().__init__()
 
         assert inp_norm is None or inp_norm in norms
 
         self.inp_norm = norms[inp_norm](in_dim) if inp_norm is not None else None
+        self.feature_dropout = nn.Dropout1d(feature_dropout) if feature_dropout else nn.Identity()
+        self.token_dropout = nn.Dropout1d(token_dropout) if token_dropout else nn.Identity()
 
         self.in_proj = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -157,6 +160,8 @@ class TokenActivationLSTM(nn.Module):
     def forward(self, embeds, mask=None):
 
         x = self.inp_norm(embeds.transpose(1, 2), mask=mask).transpose(1, 2) if self.inp_norm is not None else embeds
+        x = self.token_dropout(x)
+        x = self.feature_dropout(x.transpose(1, 2)).transpose(1, 2)
         x = self.in_proj(x)  # (B, S, hidden_dim)
 
         if mask is not None:
@@ -189,67 +194,5 @@ class TokenActivationLSTM(nn.Module):
 
 
 
-
-class SequenceInteractionHead(nn.Module):
-
-    def __init__(
-            self,
-            embed_dim: int,
-            num_layers: int = 3,
-            expansion_ratio: int = 4,
-            kernel_size: int = 3,
-            dropout: float = 0.1,
-            output_dim: int | None = None,
-            final_norm: bool = True,
-            matmul_norm: bool = True,
-    ):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.output_dim = output_dim or embed_dim
-
-        # Shared stack of blocks — applied to both sequences
-        blocks = []
-        current_dim = embed_dim
-        for i in range(num_layers):
-            blocks.append(Conv1dInvBottleNeck(
-                current_dim,
-                expansion_ratio=expansion_ratio,
-                kernel_size=kernel_size,
-                dropout=dropout,
-            ))
-
-
-        self.transform = nn.Sequential(*blocks)
-
-        self.final_norm = nn.LayerNorm(self.output_dim) if final_norm else nn.Identity()
-        self.proj = nn.Linear(embed_dim, self.output_dim, bias=False) if self.output_dim != embed_dim else nn.Identity()
-        self.matmul_norm = matmul_norm
-
-    def forward(
-            self,
-            emb1: torch.Tensor,  # (B, len1, embed_dim)
-            emb2: torch.Tensor,  # (B, len2, embed_dim)
-    ) -> torch.Tensor:
-        """
-        Returns:
-            interaction: (B, len1, len2) similarity matrix
-        """
-        # Apply same transformation to both sequences
-        t1 = self.transform(emb1)  # (B, len1, embed_dim)
-        t2 = self.transform(emb2)  # (B, len2, embed_dim)
-
-        t1 = self.proj(t1)
-        t2 = self.proj(t2)
-        t1 = self.final_norm(t1)
-        t2 = self.final_norm(t2)
-
-        if self.matmul_norm:
-            t1 = t1 / (t1.norm(dim=-1, keepdim=True) + 1e-8)
-            t2 = t2 / (t2.norm(dim=-1, keepdim=True) + 1e-8)
-
-        # (B, len1, embed_dim) @ (B, embed_dim, len2) → (B, len1, len2)
-        interaction = torch.matmul(t1, t2.transpose(1, 2))
-
-        return interaction
 
 

@@ -40,6 +40,17 @@ class DiceBCELoss(nn.Module):
         dice_loss = self.dice(logits, targets, mask=mask)
         return bce_loss + dice_loss
 
+@LossBuilder.register('dice_focal')
+class DiceFocalLoss(nn.Module):
+    def __init__(self, gamma=2, alpha=0.25, probs_weight=None):
+        super().__init__()
+        self.focal = FocalLoss(gamma=gamma, alpha=alpha)
+        self.dice = DiceLoss(probs_weight=probs_weight)
+
+    def forward(self, logits, targets, mask=None):
+        focal_loss = self.focal(logits, targets, mask=mask)
+        dice_loss = self.dice(logits, targets, mask=mask)
+        return focal_loss + dice_loss
 
 @LossBuilder.register('bce')
 class BCELoss(nn.Module):
