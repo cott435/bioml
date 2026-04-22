@@ -141,7 +141,13 @@ class ClusterPairSplitter:
             y: Placeholder.
             groups: Dataframe
         """
-        c1, c2 = np.split(groups.values, 2)
+        if groups is None:
+            raise ValueError("groups cannot be None for ClusterPairSplitter.")
+        if hasattr(groups, "shape") and groups.shape[1] != 2:
+            raise ValueError("groups must contain exactly two cluster columns.")
+
+        c1 = np.asarray(groups.iloc[:, 0])
+        c2 = np.asarray(groups.iloc[:, 1])
 
         unique_clusters = np.unique(np.concatenate([c1, c2]))
         kfold = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
@@ -168,5 +174,4 @@ class ClusterPairSplitter:
             val_idx = np.where(val_mask)[0]
 
             yield train_idx, val_idx
-
 

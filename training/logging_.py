@@ -63,7 +63,7 @@ class ConvNeXtTelemetry:
             if isinstance(module, (ConvNeXt1DBlock, ResConvFFN)):
                 self.blocks[name] = module
 
-        self.enabled = writer is not None and len(self.blocks) > 0
+        self.enabled = writer is not None# and len(self.blocks) > 0
 
         if self.enabled:
             self._attach_hooks()

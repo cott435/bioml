@@ -8,11 +8,26 @@ from pathlib import Path
 from dataclasses import asdict
 import csv
 
+
+def resolve_data_dir(save_dir) -> Path:
+    base = Path(save_dir)
+    if base.is_absolute():
+        return base
+    if base.exists():
+        return base
+    alt = Path.cwd() / "data" / base
+    if alt.exists():
+        return alt
+    return base
+
+
 def make_sequence_fasta(
     sequences,
     save_dir,
     force=False
 ):
+    save_dir = resolve_data_dir(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     fasta_path = save_dir / "sequences.fasta"
     if force or not fasta_path.exists():
         from Bio.Seq import Seq
@@ -29,6 +44,8 @@ def make_sequence_fasta(
 
 
 def df_save(data, name='dataframe', file_dir=data_dir, force=False):
+    file_dir = resolve_data_dir(file_dir)
+    file_dir.mkdir(parents=True, exist_ok=True)
     file_path = file_dir / f'{name}.parquet'
     if force or not file_path.exists():
         data.to_parquet(file_path, engine='pyarrow')
@@ -36,11 +53,23 @@ def df_save(data, name='dataframe', file_dir=data_dir, force=False):
 
 
 def df_load(data_name, file_dir=data_dir):
+    file_dir = resolve_data_dir(file_dir)
     file_path = file_dir / f'{data_name}.parquet'
     return pd.read_parquet(file_path, engine='pyarrow')
 
 
+def _cd_hit_word_size(cluster_coef: float) -> str:
+    if cluster_coef >= 0.7:
+        return "5"
+    if cluster_coef >= 0.6:
+        return "4"
+    if cluster_coef >= 0.5:
+        return "3"
+    return "2"
+
+
 def cluster_fasta(fasta_path, cluster_coef=0.5, force=False):
+    fasta_path = Path(fasta_path)
     base = fasta_path.parent
     output_prefix = base / f"clustered_{int(cluster_coef*100)}_sequences"
     clstr_file = output_prefix.with_suffix(".clstr")
@@ -48,8 +77,8 @@ def cluster_fasta(fasta_path, cluster_coef=0.5, force=False):
         if not force:
             print("Clustering file not found, generating new")
         subprocess.run([
-            "cd-hit", "-i", fasta_path, "-o", output_prefix,
-            "-c", str(cluster_coef), "-n", "2", "-M", "16000", "-T", "8"
+            "cd-hit", "-i", str(fasta_path), "-o", str(output_prefix),
+            "-c", str(cluster_coef), "-n", _cd_hit_word_size(cluster_coef), "-M", "16000", "-T", "8"
         ], check=True)
     else:
         print("Clustering file found, parsing in data")
@@ -59,17 +88,20 @@ def cluster_fasta(fasta_path, cluster_coef=0.5, force=False):
 def parse_cd_hit_clstr(clstr_file, seq_ids_order, allow_ungrouped=False):
     cluster_map = {}
     cluster_id = 0
-    for line in open(clstr_file):
-        if line.startswith(">Cluster"):
-            cluster_id = int(line.split()[-1])
-        else:
-            seq_id = line.split(">")[1].split("...")[0]
-            if seq_id in seq_ids_order:  # Map back to original order
-                cluster_map[seq_id] = cluster_id
+    seq_ids_order = list(seq_ids_order)
+    seq_ids_set = set(seq_ids_order)
+    with open(clstr_file) as handle:
+        for line in handle:
+            if line.startswith(">Cluster"):
+                cluster_id = int(line.split()[-1])
+            else:
+                seq_id = line.split(">")[1].split("...")[0]
+                if seq_id in seq_ids_set:  # Map back to original order
+                    cluster_map[seq_id] = cluster_id
     if not allow_ungrouped:
         ungrouped = [id_ for id_ in seq_ids_order if id_ not in cluster_map]
         if len(ungrouped) > 0:
-            start_group_id = max(cluster_map.values()) + 1
+            start_group_id = max(cluster_map.values()) + 1 if cluster_map else 0
             cluster_map.update({id_: start_group_id+i for i, id_ in enumerate(ungrouped)})
     return cluster_map
 

@@ -1,6 +1,7 @@
 from torch import nn as nn, Tensor
 import torch
 from timm.layers import DropPath
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 def _activation_cls(name: str):
@@ -280,3 +281,42 @@ class PreActResNet1DBlock(nn.Module):
         return residual + self.drop_path(out)
 
 
+class MaskedLSTM(nn.Module):
+
+    def __init__(self, dim, dropout=0, layers=1, bidirectional=True, **kwargs):
+        super().__init__()
+        hidden_dim = dim // 2 if bidirectional else dim
+        self.stack = nn.LSTM(
+            input_size=dim,
+            hidden_size=hidden_dim,
+            num_layers=layers,
+            batch_first=True,
+            bidirectional=bidirectional,
+            dropout=dropout if layers > 1 else 0
+        )
+
+    def forward(self, x, mask=None):
+        if mask is not None:
+            lengths = mask.squeeze(-1).sum(dim=1).cpu()
+
+            packed_x = pack_padded_sequence(
+                x,
+                lengths,
+                batch_first=True,
+                enforce_sorted=False
+            )
+        else:
+            packed_x = x
+
+        lstm_out, _ = self.stack(packed_x)  # (B, S, hidden_dim)
+
+        if mask is not None:
+            lstm_out, _ = pad_packed_sequence(
+                lstm_out,
+                batch_first=True,
+                total_length=lengths.max()
+            )
+        if mask is not None:
+            lstm_out = lstm_out * mask
+
+        return lstm_out

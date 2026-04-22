@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import esm; print\\(esm.__version__\\); print\\(esm.__file__\\)\")",
+      "Bash(pip show *)",
+      "Bash(pip list *)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

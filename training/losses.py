@@ -55,7 +55,7 @@ class DiceFocalLoss(nn.Module):
 @LossBuilder.register('bce')
 class BCELoss(nn.Module):
 
-    def __init__(self, reduction='mean', pos_weight=None):
+    def __init__(self, reduction='split_mean', pos_weight=None):
         super().__init__()
         pos_weight = torch.tensor(pos_weight) if pos_weight is not None else None
         self.bce = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pos_weight)
@@ -71,6 +71,13 @@ class BCELoss(nn.Module):
             return loss.sum() if mask is None else torch.mean(loss.sum(-1) / targets.sum(-1))
         elif self.reduction == 'sum':
             return loss.sum()
+        elif self.reduction == 'split_mean':
+            mask = torch.ones_like(targets) if mask is None else mask
+            pos_mask = (targets > 0.5) & mask
+            neg_mask = (targets < 0.5) & mask
+            pos_loss_mean = (loss * pos_mask).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
+            neg_loss_mean = (loss * neg_mask).sum(dim=1) / (neg_mask.sum(dim=1) + 1e-8)
+            loss = 0.5 * (pos_loss_mean + neg_loss_mean)
         return loss
 
 @LossBuilder.register('dice')
@@ -94,7 +101,7 @@ class DiceLoss(nn.Module):
 
 @LossBuilder.register('focal')
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='none', smoothing=True):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='split_mean', smoothing=False):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -122,6 +129,13 @@ class FocalLoss(nn.Module):
             return loss.mean() if mask is None else loss.sum() / mask.sum()
         elif self.reduction == 'targets':
             return loss.sum() if mask is None else torch.mean(loss.sum(-1) / targets.sum(-1))
+        elif self.reduction == 'split_mean':
+            mask = torch.ones_like(targets).to(torch.bool) if mask is None else mask
+            pos_mask = (targets > 0.5) & mask
+            neg_mask = (targets < 0.5) & mask
+            pos_loss_mean = (loss * pos_mask).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
+            neg_loss_mean = (loss * neg_mask).sum(dim=1) / (neg_mask.sum(dim=1) + 1e-8)
+            loss = 0.5 * (pos_loss_mean + neg_loss_mean)
         return loss
 
 

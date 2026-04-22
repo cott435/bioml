@@ -146,11 +146,10 @@ class GridSearch(BaseSearch):
         self.search_space = {}
         self.fixed_params = {}
         for name, value in params.items():
-            if isinstance(value, (list, tuple)):
-                options = list(value)
-                if not options:
+            if isinstance(value, (list, tuple, dict)):
+                if not value:
                     raise ValueError(f"GridSearch parameter '{name}' has no options.")
-                self.search_space[name] = options
+                self.search_space[name] = value
             else:
                 self.fixed_params[name] = value
 
@@ -163,7 +162,7 @@ class GridSearch(BaseSearch):
             max_trial_history=max_trial_history,
         )
 
-    def _iter_param_sets(self):
+    def _iter_param_sets_(self):
         if not self.search_space:
             yield {}
             return
@@ -172,6 +171,56 @@ class GridSearch(BaseSearch):
         values = [self.search_space[k] for k in keys]
         for combo in itertools.product(*values):
             yield dict(zip(keys, combo))
+
+    def _iter_param_sets(self):
+        if not self.search_space:
+            yield {}
+            return
+
+        conditional: dict[str, dict] = {}
+        regular: dict[str, list] = {}
+
+        for key, val in self.search_space.items():
+            (conditional if isinstance(val, dict) else regular)[key] = val
+
+        base_keys = list(regular.keys())
+        base_combos = [
+                          dict(zip(base_keys, combo))
+                          for combo in itertools.product(*regular.values())
+                      ] or [{}]
+
+        for cond_key, branches in conditional.items():
+            expanded = []
+            for base in base_combos:
+                for branch_val, sub_params in branches.items():
+                    sub_grid = list(self._iter_param_sets_from(sub_params))
+                    expanded.extend({**base, cond_key: branch_val, **sub} for sub in sub_grid)
+            base_combos = expanded
+
+        yield from base_combos
+
+    def _iter_param_sets_from(self, params: dict):
+        if not params:
+            yield {}
+            return
+
+        conditional = {k: v for k, v in params.items() if isinstance(v, dict)}
+        regular = {k: v if isinstance(v, list) else [v] for k, v in params.items() if not isinstance(v, dict)}
+
+        base_combos = [
+                          dict(zip(regular, combo))
+                          for combo in itertools.product(*regular.values())
+                      ] or [{}]
+
+        for cond_key, branches in conditional.items():
+            expanded = []
+            for base in base_combos:
+                for branch_val, sub_params in branches.items():
+                    sub_grid = list(self._iter_param_sets_from(sub_params))
+                    expanded.extend({**base, cond_key: branch_val, **sub} for sub in sub_grid)
+            base_combos = expanded
+
+        yield from base_combos
 
     def _is_better(self, score: float) -> bool:
         if self._best_value is None:

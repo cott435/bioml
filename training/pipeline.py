@@ -49,9 +49,20 @@ class TrainingPipeline:
 
     def _calculate_output_bias(self):
         training_data = self.dataset.data.iloc[self.train_idx]
-        pos = training_data['Y'].apply(lambda x: len(x)).sum()
-        neg = training_data['Sequence'].apply(lambda x: len(x)).sum() - pos
-        return np.log(pos / neg)
+        targets = training_data["Y"]
+        is_token_target = targets.apply(lambda x: isinstance(x, (list, tuple, set, np.ndarray))).all()
+        if not is_token_target:
+            return 0.0
+
+        pos = targets.apply(lambda x: len(x)).sum()
+        if "Sequence" in training_data.columns:
+            total_tokens = training_data["Sequence"].str.len().sum()
+        elif "Sequence1" in training_data.columns and "Sequence2" in training_data.columns:
+            total_tokens = training_data["Sequence1"].str.len().sum() + training_data["Sequence2"].str.len().sum()
+        else:
+            total_tokens = pos + 1
+        neg = max(total_tokens - pos, 1)
+        return float(np.log(max(pos, 1) / neg))
 
     def _get_loaders(self, max_tokens):
         train_ds = Subset(self.dataset, self.train_idx)
