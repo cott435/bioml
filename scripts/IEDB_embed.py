@@ -1,4 +1,3 @@
-from PIL.ImagePalette import raw
 
 
 def main(tdc=False):

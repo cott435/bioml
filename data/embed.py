@@ -461,9 +461,25 @@ class ESM3Generator:
             return np.asarray(cleaned, dtype=np.float32)
         return np.asarray(value)
 
-    def generate(self, sequence: str, tracks: tuple[str, ...] | None = None) -> dict:
-        tracks = tracks if tracks is not None else self.tracks
+    @staticmethod
+    def _ordered_tracks(tracks) -> tuple[str, ...]:
+        """Always generate 'structure' before 'sasa' so sasa conditions on coords."""
+        priority = {"structure": 0, "sasa": 1}
+        return tuple(sorted(tracks, key=lambda t: priority.get(t, 99)))
+
+    def generate(
+        self,
+        sequence: str,
+        tracks: tuple[str, ...] | None = None,
+        init_structure: np.ndarray | torch.Tensor | None = None,
+    ) -> dict:
+        tracks = self._ordered_tracks(tracks if tracks is not None else self.tracks)
         protein = ESMProtein(sequence=sequence)
+        if init_structure is not None:
+            coords_t = init_structure
+            if isinstance(coords_t, np.ndarray):
+                coords_t = torch.from_numpy(np.ascontiguousarray(coords_t))
+            protein.coordinates = coords_t.to(torch.float32)
         steps = self._num_steps_for(len(sequence))
         outputs: dict = {}
         for track in tracks:
@@ -496,8 +512,26 @@ class ESM3Generator:
                     missing = tuple(t for t in self.tracks if seq_id not in existing[t])
                 if not missing:
                     continue
+                missing = self._ordered_tracks(missing)
 
-                new_record = self.generate(sequence, tracks=missing)
+                # If sasa is missing but structure is already stored, seed the
+                # protein with those coordinates so sasa prediction benefits.
+                init_structure = None
+                if (
+                    "sasa" in missing
+                    and "structure" not in missing
+                    and store.contains(seq_id)
+                ):
+                    try:
+                        prev = store.read(seq_id)
+                        if "structure" in prev and np.asarray(prev["structure"]).size > 0:
+                            init_structure = prev["structure"]
+                    except Exception:
+                        init_structure = None
+
+                new_record = self.generate(
+                    sequence, tracks=missing, init_structure=init_structure
+                )
 
                 merged = dict(new_record)
                 if not force and store.contains(seq_id):

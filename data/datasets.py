@@ -47,6 +47,82 @@ class _EmbeddingReaderMixin:
             + (f" and fallback storage for '{storage}'." if allow_storage_fallback else ".")
         )
 
+    def _setup_esm3_store(
+        self,
+        save_dir: Path,
+        data_name: str,
+        esm3_model_name: str | None,
+        include_structure: bool,
+        include_sasa: bool,
+        storage: str,
+        allow_storage_fallback: bool,
+    ):
+        """Open a secondary store for ESM3 structure/sasa outputs if requested.
+        Sets self.esm3_store, self.include_structure, self.include_sasa, self.esm3_extra_dim.
+        Returns the set of seq_ids that have ALL requested tracks available, or None if no ESM3.
+        """
+        self.include_structure = bool(include_structure)
+        self.include_sasa = bool(include_sasa)
+        self.esm3_store = None
+        self.esm3_extra_dim = 0
+        if not (self.include_structure or self.include_sasa):
+            return None
+        if esm3_model_name is None:
+            raise ValueError(
+                "esm3_model_name must be provided when include_structure or include_sasa is True."
+            )
+        esm3_dir = save_dir / data_name / esm3_model_name
+        esm3_path, esm3_storage = self._resolve_storage_path(
+            model_name=esm3_model_name,
+            model_dir=esm3_dir,
+            storage=storage,
+            allow_storage_fallback=allow_storage_fallback,
+        )
+        self.esm3_store = _load_store(esm3_path, esm3_storage, readonly=True)
+        required_tracks = []
+        if self.include_structure:
+            required_tracks.append("structure")
+        if self.include_sasa:
+            required_tracks.append("sasa")
+
+        ready: set[str] = set()
+        for seq_id in self.esm3_store.list_ids():
+            try:
+                record = self.esm3_store.read(seq_id)
+            except Exception:
+                continue
+            if all(
+                t in record and np.asarray(record[t]).size > 0 for t in required_tracks
+            ):
+                ready.add(seq_id)
+        return ready
+
+    def _esm3_feature_vector(self, seq_id: str, seq_len: int) -> np.ndarray:
+        """Return concatenated (structure-flat, sasa) features shape (seq_len, extra_dim)."""
+        if self.esm3_store is None:
+            return np.zeros((seq_len, 0), dtype=np.float32)
+        record = self.esm3_store.read(seq_id)
+        parts = []
+        if self.include_structure:
+            coords = np.asarray(record["structure"], dtype=np.float32)
+            if coords.ndim >= 2:
+                coords = coords.reshape(coords.shape[0], -1)
+            else:
+                coords = coords[:, None]
+            parts.append(coords[:seq_len])
+        if self.include_sasa:
+            sasa = np.asarray(record["sasa"], dtype=np.float32)
+            if sasa.ndim == 1:
+                sasa = sasa[:, None]
+            parts.append(sasa[:seq_len])
+        if not parts:
+            return np.zeros((seq_len, 0), dtype=np.float32)
+        feat = np.concatenate(parts, axis=-1)
+        if feat.shape[0] < seq_len:
+            pad = np.zeros((seq_len - feat.shape[0], feat.shape[1]), dtype=np.float32)
+            feat = np.concatenate([feat, pad], axis=0)
+        return np.nan_to_num(feat, copy=False)
+
     @staticmethod
     def _normalize_hidden_layers(hidden_layers):
         if hidden_layers is None:
@@ -134,6 +210,9 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         allow_storage_fallback: bool = True,
         representation: RepresentationMode = "embeddings",
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
+        include_structure: bool = False,
+        include_sasa: bool = False,
+        esm3_model_name: str | None = None,
     ):
         super().__init__(
             data_name,
@@ -164,10 +243,27 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         self.store = _load_store(self.file_path, self.storage, readonly=True)
         stored_ids = set(self.store.list_ids())
 
+        esm3_ready_ids = self._setup_esm3_store(
+            save_dir=save_dir,
+            data_name=data_name,
+            esm3_model_name=esm3_model_name,
+            include_structure=include_structure,
+            include_sasa=include_sasa,
+            storage=storage,
+            allow_storage_fallback=allow_storage_fallback,
+        )
+
+        def _has_embeddings_and_esm3(seq_id):
+            if seq_id not in stored_ids:
+                return False
+            if esm3_ready_ids is not None and seq_id not in esm3_ready_ids:
+                return False
+            return True
+
         filtered_unique = {
             seq_id: seq
             for seq_id, seq in self.unique_sequences.items()
-            if len(seq) < max_len and seq_id in stored_ids
+            if len(seq) < max_len and _has_embeddings_and_esm3(seq_id)
         }
         dropped_for_len = len(self.unique_sequences) - len(
             {seq_id: seq for seq_id, seq in self.unique_sequences.items() if len(seq) < max_len}
@@ -178,12 +274,14 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         missing_ids = [
             seq_id
             for seq_id, seq in self.unique_sequences.items()
-            if len(seq) < max_len and seq_id not in stored_ids
+            if len(seq) < max_len and not _has_embeddings_and_esm3(seq_id)
         ]
         if missing_ids and missing == "raise":
-            raise ValueError(f"Missing embeddings for {len(missing_ids)} IDs in {self.file_path}")
+            raise ValueError(
+                f"Missing embeddings (or ESM3 tracks) for {len(missing_ids)} IDs."
+            )
         if missing_ids and missing == "remove":
-            print(f"Removed {len(missing_ids)} rows with missing embeddings")
+            print(f"Removed {len(missing_ids)} rows with missing embeddings/ESM3 tracks")
 
         self.unique_sequences = filtered_unique
         self.data = self.data[self.data["ID"].isin(self.unique_sequences.keys())].reset_index(drop=True)
@@ -199,7 +297,15 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
 
     def _get_embedding(self, seq_id: str) -> np.ndarray:
         record = self.store.read(seq_id)
-        return self._build_representation(record).astype(np.float32, copy=False)
+        emb = self._build_representation(record).astype(np.float32, copy=False)
+        if self.include_structure or self.include_sasa:
+            extras = self._esm3_feature_vector(seq_id, seq_len=emb.shape[0])
+            if extras.shape[0] != emb.shape[0]:
+                min_len = min(extras.shape[0], emb.shape[0])
+                emb = emb[:min_len]
+                extras = extras[:min_len]
+            emb = np.concatenate([emb, extras], axis=-1)
+        return emb
 
     def __getitem__(self, idx):
         seq_id = self.ids[idx]
@@ -212,6 +318,9 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         if getattr(self, "store", None) is not None:
             self.store.close()
             self.store = None
+        if getattr(self, "esm3_store", None) is not None:
+            self.esm3_store.close()
+            self.esm3_store = None
 
     def __del__(self):
         self.close()
@@ -329,6 +438,9 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
         allow_storage_fallback: bool = True,
         representation: RepresentationMode = "embeddings",
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
+        include_structure: bool = False,
+        include_sasa: bool = False,
+        esm3_model_name: str | None = None,
     ):
         super().__init__(
             data_name,
@@ -357,9 +469,21 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
         self.store = _load_store(self.file_path, self.storage, readonly=True)
         stored_ids = set(self.store.list_ids())
 
+        esm3_ready_ids = self._setup_esm3_store(
+            save_dir=save_dir,
+            data_name=data_name,
+            esm3_model_name=esm3_model_name,
+            include_structure=include_structure,
+            include_sasa=include_sasa,
+            storage=storage,
+            allow_storage_fallback=allow_storage_fallback,
+        )
+
+        available = stored_ids if esm3_ready_ids is None else (stored_ids & esm3_ready_ids)
+
         keep_mask = (
-            self.data["ID1"].isin(stored_ids)
-            & self.data["ID2"].isin(stored_ids)
+            self.data["ID1"].isin(available)
+            & self.data["ID2"].isin(available)
             & (self.data["Sequence1"].str.len() < max_len)
             & (self.data["Sequence2"].str.len() < max_len)
         )
@@ -370,14 +494,25 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
         self.ids1 = self.data["ID1"].astype(str).to_numpy()
         self.ids2 = self.data["ID2"].astype(str).to_numpy()
         self.targets = self.data["Y"].to_numpy()
-        self.embed_dim = int(self._build_representation(self.store.read(self.ids1[0])).shape[-1])
+        self.embed_dim = int(self._get_pair_features(self.ids1[0]).shape[-1])
+
+    def _get_pair_features(self, seq_id: str) -> np.ndarray:
+        emb = self._build_representation(self.store.read(seq_id)).astype(np.float32, copy=False)
+        if self.include_structure or self.include_sasa:
+            extras = self._esm3_feature_vector(seq_id, seq_len=emb.shape[0])
+            if extras.shape[0] != emb.shape[0]:
+                min_len = min(extras.shape[0], emb.shape[0])
+                emb = emb[:min_len]
+                extras = extras[:min_len]
+            emb = np.concatenate([emb, extras], axis=-1)
+        return emb
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        emb1 = torch.from_numpy(self._build_representation(self.store.read(self.ids1[idx])).astype(np.float32, copy=False))
-        emb2 = torch.from_numpy(self._build_representation(self.store.read(self.ids2[idx])).astype(np.float32, copy=False))
+        emb1 = torch.from_numpy(self._get_pair_features(self.ids1[idx]))
+        emb2 = torch.from_numpy(self._get_pair_features(self.ids2[idx]))
         y = torch.tensor(float(self.targets[idx]), dtype=torch.float32)
         return emb1, emb2, y
 
@@ -385,6 +520,9 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
         if getattr(self, "store", None) is not None:
             self.store.close()
             self.store = None
+        if getattr(self, "esm3_store", None) is not None:
+            self.esm3_store.close()
+            self.esm3_store = None
 
     def __del__(self):
         self.close()

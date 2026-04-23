@@ -78,7 +78,7 @@ class SequenceProcessingPipeline:
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         dtype: str = "float16",
         device: str = "cpu",
-        max_tok_per_batch: int = 5000,
+        max_tok_per_batch: int = 50000,
         force_preprocess: bool = False,
         force_embed: bool = False,
         token: str | None = None,
@@ -172,7 +172,11 @@ class SequenceProcessingPipeline:
         representation: str = "embeddings",
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         max_len: int = 5000,
+        include_structure: bool = True,
+        include_sasa: bool = True,
+        esm3_model_name: str = "esm3_sm_open_v1",
     ):
+        esm3_name = esm3_model_name if (include_structure or include_sasa) else None
         if self.sequence_kind == "single":
             return ESMCSingleDS(
                 self.data_name,
@@ -182,6 +186,9 @@ class SequenceProcessingPipeline:
                 representation=representation,
                 hidden_layers=hidden_layers,
                 max_len=max_len,
+                include_structure=include_structure,
+                include_sasa=include_sasa,
+                esm3_model_name=esm3_name,
             )
         return ESMCPairDS(
             self.data_name,
@@ -191,4 +198,7 @@ class SequenceProcessingPipeline:
             representation=representation,
             hidden_layers=hidden_layers,
             max_len=max_len,
+            include_structure=include_structure,
+            include_sasa=include_sasa,
+            esm3_model_name=esm3_name,
         )
