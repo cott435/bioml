@@ -10,7 +10,6 @@ from .embed import (
     ESM3LocalGenerator,
     ESMCBatchEmbedder,
     ESMCForgeEmbedder,
-    VALID_ESM3_TRACKS,
 )
 from .parse import data_dir
 from .pre_embed import MultiSequenceDS, SingleSequenceDS
@@ -78,11 +77,12 @@ class SequenceProcessingPipeline:
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         dtype: str = "float16",
         device: str = "cpu",
+        temperature=1.0,
         max_tok_per_batch: int = 50000,
         force_preprocess: bool = False,
         force_embed: bool = False,
         token: str | None = None,
-        esm3_tracks: list[str] | tuple[str, ...] | str | None = None,
+        esm3_tracks: bool = True,
         esm3_model_name: str = "esm3_sm_open_v1",
         esm3_max_seq_len: int = 2048,
         esm3_num_steps: int | None = None,
@@ -123,21 +123,14 @@ class SequenceProcessingPipeline:
         esm3_tracks_used: tuple[str, ...] = ()
 
         if esm3_tracks:
-            tracks_tuple = (esm3_tracks,) if isinstance(esm3_tracks, str) else tuple(esm3_tracks)
-            invalid = [t for t in tracks_tuple if t not in VALID_ESM3_TRACKS]
-            if invalid:
-                raise ValueError(
-                    f"Invalid esm3_tracks {invalid}. Expected subset of {VALID_ESM3_TRACKS}."
-                )
-
             esm3_kwargs = dict(
                 model_name=esm3_model_name,
                 save_dir=self.save_dir / self.data_name,
                 storage=storage,
                 dtype=esm3_dtype or dtype,
                 max_seq_len=esm3_max_seq_len,
-                tracks=tracks_tuple,
                 num_steps=esm3_num_steps,
+                temperature=temperature,
             )
 
             if embedder_kind == "local":
@@ -154,7 +147,6 @@ class SequenceProcessingPipeline:
 
             esm3_written = generator.batch_save(ds.unique_sequences, force=force_esm3)
             esm3_file = generator.file_path
-            esm3_tracks_used = tracks_tuple
 
         return PipelineResult(
             sequence_dataset=ds,

@@ -20,7 +20,7 @@ def main(tdc=False):
         sequence_kind="single",
         save_dir=base_data_dir,
     )
-    device = 'cpu'# = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     result = pipe.run(
         df=raw_data,
@@ -28,14 +28,15 @@ def main(tdc=False):
         include_hidden_states=True,
         hidden_layers=[1, 5, 10, 15, 20, 25],
         device=device,
-        esm3_tracks=("structure", "sasa")
-
+        temperature=1e-6
     )
 
     train_ds = pipe.build_training_dataset(
         storage="lmdb",
         representation="concat",
         hidden_layers=[1, 10, 20],
+        include_sasa=True,
+        include_structure=True,
     )
 
     d = train_ds[0]

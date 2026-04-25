@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import List, Tuple
 
@@ -12,6 +12,7 @@ from esm.sdk.api import ESMProtein, ESMProteinTensor, GenerationConfig, LogitsCo
 from esm.utils.misc import stack_variable_length_tensors
 from esm.utils.sampling import _BatchedESMProteinTensor
 from tqdm.auto import tqdm
+from os import unlink
 
 from .embedding_store import (
     H5EmbeddingStore,
@@ -60,6 +61,29 @@ def _to_numpy_dtype(dtype) -> np.dtype:
     if dtype in {np.float16, np.float32}:
         return np.dtype(dtype)
     raise ValueError(f"Unsupported dtype '{dtype}'. Use float16 or float32.")
+
+
+def compute_sasa_from_pdb(pdb_string: str) -> dict:
+    import freesasa
+    """Per-residue SASA (Å²) via FreeSASA. Deterministic, geometry-based."""
+    # FreeSASA needs a file or stream; use a temp file for simplicity.
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".pdb", delete=False) as f:
+        f.write(pdb_string)
+        path = f.name
+    try:
+        structure = freesasa.Structure(path)
+        result = freesasa.calc(structure)
+        residue_areas = result.residueAreas()
+        per_res = defaultdict(list)
+        chain = next(iter(residue_areas))
+        for resnum in sorted(residue_areas[chain], key=lambda x: int(x)):
+            for k, v in residue_areas[chain][resnum].__dict__.items():
+                per_res[f'sasa_{k}'].append(v)
+        return {k: np.array(v) for k, v in per_res.items()}
+    finally:
+        unlink(path)
 
 
 class ESMCEmbedder:
@@ -348,7 +372,7 @@ class ESMCForgeEmbedder(ESMCEmbedder):
         return n_written
 
 
-VALID_ESM3_TRACKS = ("structure", "sasa")
+ESM3_TRACKS = ("structure", "sasa")
 
 ESM3_FORGE_NAME_MAP = {
     "esm3_sm_open_v1": "esm3-open-small-2024-03",
@@ -377,16 +401,16 @@ class ESM3Generator:
         dtype: str | np.dtype = "float16",
         max_seq_len: int = 2048,
         device: torch.device | str = "cpu",
-        tracks: tuple[str, ...] | list[str] | str = ("structure", "sasa"),
         num_steps: int | None = None,
+        temperature=1.0
     ):
         self.storage = normalize_storage(storage)
         self.numpy_dtype = _to_numpy_dtype(dtype)
         self.max_seq_len = int(max_seq_len)
         self.device = device if isinstance(device, torch.device) else torch.device(device)
-        self.tracks = self._normalize_tracks(tracks)
         self.num_steps = num_steps
         self.model_name = model_name
+        self.temperature = temperature
 
         self.output_dir = None
         self.file_path = None
@@ -397,20 +421,6 @@ class ESM3Generator:
             self.file_path = embedding_file_path(self.output_dir, model_name, self.storage)
 
         self._set_model(model_name)
-
-    @staticmethod
-    def _normalize_tracks(tracks):
-        if isinstance(tracks, str):
-            tracks = (tracks,)
-        tracks = tuple(t.strip().lower() for t in tracks)
-        invalid = [t for t in tracks if t not in VALID_ESM3_TRACKS]
-        if invalid:
-            raise ValueError(
-                f"Invalid ESM3 tracks {invalid}. Expected subset of {VALID_ESM3_TRACKS}."
-            )
-        if not tracks:
-            raise ValueError("At least one ESM3 track must be specified.")
-        return tracks
 
     def _set_model(self, model_name: str):
         raise NotImplementedError
@@ -429,7 +439,7 @@ class ESM3Generator:
 
     def _load_existing_track_map(self) -> dict[str, set[str]]:
         """For each target track, return the set of seq_ids already stored."""
-        per_track: dict[str, set[str]] = {t: set() for t in self.tracks}
+        per_track: dict[str, set[str]] = {t: set() for t in ESM3_TRACKS}
         if self.file_path is None or not self.file_path.exists():
             return per_track
         with self._open_store(readonly=True) as store:
@@ -438,7 +448,7 @@ class ESM3Generator:
                     record = store.read(seq_id)
                 except Exception:
                     continue
-                for track in self.tracks:
+                for track in ESM3_TRACKS:
                     if track in record and np.asarray(record[track]).size > 0:
                         per_track[track].add(seq_id)
         return per_track
@@ -461,43 +471,42 @@ class ESM3Generator:
             return np.asarray(cleaned, dtype=np.float32)
         return np.asarray(value)
 
-    @staticmethod
-    def _ordered_tracks(tracks) -> tuple[str, ...]:
-        """Always generate 'structure' before 'sasa' so sasa conditions on coords."""
-        priority = {"structure": 0, "sasa": 1}
-        return tuple(sorted(tracks, key=lambda t: priority.get(t, 99)))
-
     def generate(
         self,
         sequence: str,
-        tracks: tuple[str, ...] | None = None,
         init_structure: np.ndarray | torch.Tensor | None = None,
     ) -> dict:
-        tracks = self._ordered_tracks(tracks if tracks is not None else self.tracks)
         protein = ESMProtein(sequence=sequence)
+        steps = 1 if self.device.type == 'cpu' else self._num_steps_for(len(sequence))
+        outputs: dict = {}
         if init_structure is not None:
             coords_t = init_structure
             if isinstance(coords_t, np.ndarray):
                 coords_t = torch.from_numpy(np.ascontiguousarray(coords_t))
             protein.coordinates = coords_t.to(torch.float32)
-        steps = self._num_steps_for(len(sequence))
-        outputs: dict = {}
-        for track in tracks:
-            config = GenerationConfig(track=track, num_steps=steps)
+        else:
+            config = GenerationConfig(track="structure", num_steps=steps, temperature=self.temperature)
             protein = self.model.generate(protein, config)
-            if track == "structure":
-                coords = self._to_numpy(getattr(protein, "coordinates", None))
-                outputs["structure"] = coords.astype(self.numpy_dtype, copy=False)
-            elif track == "sasa":
-                sasa = self._to_numpy(getattr(protein, "sasa", None))
-                outputs["sasa"] = sasa.astype(self.numpy_dtype, copy=False)
+            outputs["structure"] = self._to_numpy(protein.coordinates)
+            outputs["plddt"] = self._to_numpy(protein.plddt)
+            if protein.ptm is not None:
+                outputs["ptm"] = self._to_numpy(protein.ptm)
+            outputs["pae"] = self._to_numpy(protein.pae)[0]
+        # Generate esm sasa
+        config = GenerationConfig(track="sasa", num_steps=steps, temperature=self.temperature)
+        protein = self.model.generate(protein, config)
+        outputs["sasa_esm"] = self._to_numpy(protein.sasa)
+        # generate freesasa
+        pdb_string = protein.to_pdb_string()
+        sasa = compute_sasa_from_pdb(pdb_string)
+        outputs["sasa"] = sasa
         return outputs
 
     def batch_save(self, sequences: dict, force: bool = False, desc: str = "ESM3 generating"):
         if self.file_path is None:
             raise ValueError("save_dir was not provided; cannot persist ESM3 outputs.")
 
-        existing = {t: set() for t in self.tracks} if force else self._load_existing_track_map()
+        existing = {t: set() for t in ESM3_TRACKS} if force else self._load_existing_track_map()
 
         n_written = 0
         n_skipped_len = 0
@@ -507,15 +516,12 @@ class ESM3Generator:
                     n_skipped_len += 1
                     continue
                 if force:
-                    missing = self.tracks
+                    missing = ESM3_TRACKS
                 else:
-                    missing = tuple(t for t in self.tracks if seq_id not in existing[t])
+                    missing = tuple(t for t in ESM3_TRACKS if seq_id not in existing[t])
                 if not missing:
                     continue
-                missing = self._ordered_tracks(missing)
 
-                # If sasa is missing but structure is already stored, seed the
-                # protein with those coordinates so sasa prediction benefits.
                 init_structure = None
                 if (
                     "sasa" in missing
@@ -530,18 +536,17 @@ class ESM3Generator:
                         init_structure = None
 
                 new_record = self.generate(
-                    sequence, tracks=missing, init_structure=init_structure
+                    sequence, init_structure=init_structure
                 )
 
-                merged = dict(new_record)
                 if not force and store.contains(seq_id):
                     try:
                         prev = store.read(seq_id)
-                        prev.update(merged)
-                        merged = prev
+                        prev.update(new_record)
+                        new_record = prev
                     except Exception:
                         pass
-                store.write(seq_id, merged, overwrite=True)
+                store.write(seq_id, new_record, overwrite=True)
                 n_written += 1
 
         if n_skipped_len:

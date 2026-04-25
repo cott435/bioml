@@ -380,44 +380,6 @@ class ESMLMDBDataset(ESMCSingleDS):
         super().__init__(*args, **kwargs)
 
 
-class PackedSequenceDataset(SingleSequenceDS, torch.utils.data.Dataset):
-    def __init__(
-        self,
-        data_name,
-        model_name,
-        cluster_coef=0.5,
-        column_map=None,
-        save_dir=data_dir,
-        force=False,
-        max_len=5000,
-    ):
-        super().__init__(
-            data_name,
-            cluster_coef=cluster_coef,
-            column_map=column_map,
-            save_dir=save_dir,
-            force=force,
-        )
-        files_dir = resolve_data_dir(save_dir) / data_name / model_name
-        self.embeddings = np.load(files_dir / "embeddings.npy", mmap_mode="r")
-        self.labels = np.load(files_dir / "labels.npy", mmap_mode="r")
-        self.offsets = np.load(files_dir / "offsets.npy")
-        self.lengths = np.load(files_dir / "lengths.npy")
-        unique_sequences = {seq_id: seq for seq_id, seq in self.unique_sequences.items() if len(seq) < max_len}
-        self.data = self.data[self.data["ID"].isin(unique_sequences.keys())].reset_index(drop=True)
-        self.embed_dim = self.embeddings.shape[1]
-
-    def __len__(self):
-        return len(self.offsets)
-
-    def __getitem__(self, idx):
-        start = self.offsets[idx]
-        end = start + self.lengths[idx]
-        emb = torch.from_numpy(self.embeddings[start:end].copy()).to(torch.float32)
-        y = torch.from_numpy(self.labels[start:end].copy()).to(torch.float32)
-        return emb, y
-
-
 class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixin):
     """
     Pair dataset for interaction-style tasks where each row has two sequences.
