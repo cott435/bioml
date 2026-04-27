@@ -89,6 +89,7 @@ class SequenceProcessingPipeline:
         esm3_dtype: str | None = None,
         force_esm3: bool = False,
         hf_token: str | None = None,
+        max_block=None
     ) -> PipelineResult:
         ds = self._build_sequence_dataset(df=df, column_map=column_map, force=force_preprocess)
         ds.ensure_preprocessed(force=force_preprocess)
@@ -145,7 +146,7 @@ class SequenceProcessingPipeline:
                     **esm3_kwargs,
                 )
 
-            esm3_written = generator.batch_save(ds.unique_sequences, force=force_esm3)
+            esm3_written = generator.batch_save(ds.unique_sequences, force=force_esm3, max_block=max_block)
             esm3_file = generator.file_path
 
         return PipelineResult(

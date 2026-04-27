@@ -81,7 +81,9 @@ def compute_sasa_from_pdb(pdb_string: str) -> dict:
         for resnum in sorted(residue_areas[chain], key=lambda x: int(x)):
             for k, v in residue_areas[chain][resnum].__dict__.items():
                 per_res[f'sasa_{k}'].append(v)
-        return {k: np.array(v) for k, v in per_res.items()}
+        data = {k: np.array(v) for k, v in per_res.items()}
+        data['sasa_residueNumber'] = data['sasa_residueNumber'].astype(np.int16)
+        return data
     finally:
         unlink(path)
 
@@ -372,7 +374,7 @@ class ESMCForgeEmbedder(ESMCEmbedder):
         return n_written
 
 
-ESM3_TRACKS = ("structure", "sasa")
+ESM3_TRACKS = ("structure", "sasa_esm", "sasa_total")
 
 ESM3_FORGE_NAME_MAP = {
     "esm3_sm_open_v1": "esm3-open-small-2024-03",
@@ -499,10 +501,10 @@ class ESM3Generator:
         # generate freesasa
         pdb_string = protein.to_pdb_string()
         sasa = compute_sasa_from_pdb(pdb_string)
-        outputs["sasa"] = sasa
+        outputs.update(sasa)
         return outputs
 
-    def batch_save(self, sequences: dict, force: bool = False, desc: str = "ESM3 generating"):
+    def batch_save(self, sequences: dict, force: bool = False, desc: str = "ESM3 generating", max_block=None):
         if self.file_path is None:
             raise ValueError("save_dir was not provided; cannot persist ESM3 outputs.")
 
@@ -548,6 +550,9 @@ class ESM3Generator:
                         pass
                 store.write(seq_id, new_record, overwrite=True)
                 n_written += 1
+                if max_block and n_written >= max_block:
+                    print("Max limit for session reached. Ending session.")
+                    break
 
         if n_skipped_len:
             print(f"Skipped {n_skipped_len} sequences exceeding max_seq_len={self.max_seq_len}.")

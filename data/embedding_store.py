@@ -197,6 +197,9 @@ class LMDBEmbeddingStore(BaseEmbeddingStore):
     def write(self, seq_id: str, record: Dict[str, np.ndarray], overwrite: bool = False):
         if self.readonly:
             raise RuntimeError("LMDB store opened readonly; cannot write.")
+        if any([arr.dtype == object for arr in record.values()]):
+            print(f"Object dtype detected for seq_id {seq_id}, skipping write.")
+            return
         payload = _pack_npz(record, compressed=self.compressed)
         keys = self._load_keys()
         with self._env.begin(write=True) as txn:

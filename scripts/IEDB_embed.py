@@ -1,6 +1,6 @@
 
 
-def main(tdc=False):
+def main(tdc=False, max_block=None, embed=True):
     from pathlib import Path
     from data import SequenceProcessingPipeline
     import torch
@@ -21,25 +21,26 @@ def main(tdc=False):
         save_dir=base_data_dir,
     )
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if embed:
+        result = pipe.run(
+            df=raw_data,
+            storage="lmdb",
+            include_hidden_states=True,
+            hidden_layers=[1, 5, 10, 15, 20, 25],
+            device=device,
+            temperature=1e-6,
+            max_block=max_block
+        )
+    else:
+        train_ds = pipe.build_training_dataset(
+            storage="lmdb",
+            representation="concat",
+            hidden_layers=[1, 10, 20],
+            include_sasa=True,
+            include_structure=True,
+        )
 
-    result = pipe.run(
-        df=raw_data,
-        storage="lmdb",
-        include_hidden_states=True,
-        hidden_layers=[1, 5, 10, 15, 20, 25],
-        device=device,
-        temperature=1e-6
-    )
-
-    train_ds = pipe.build_training_dataset(
-        storage="lmdb",
-        representation="concat",
-        hidden_layers=[1, 10, 20],
-        include_sasa=True,
-        include_structure=True,
-    )
-
-    d = train_ds[0]
+        d = train_ds[0]
 
 
 if __name__ == "__main__":
