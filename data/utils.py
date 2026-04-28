@@ -1,3 +1,5 @@
+import os
+import shutil
 import subprocess
 import pandas as pd
 from .parse import data_dir
@@ -19,6 +21,51 @@ def resolve_data_dir(save_dir) -> Path:
     if alt.exists():
         return alt
     return base
+
+
+def is_colab() -> bool:
+    return os.environ.get("RUNTIME_ENV", "").strip().lower() == "colab"
+
+
+COLAB_LOCAL_ROOT = Path("/content/local_data")
+_COLAB_DRIVE_ROOTS = (
+    "/content/drive/MyDrive/",
+    "/content/drive/Shareddrives/",
+    "/content/drive/",
+)
+
+
+def colab_local_path(drive_path) -> Path:
+    """Mirror a Drive (FUSE) path to a fast local working path under /content/local_data."""
+    drive_path = Path(drive_path)
+    s = str(drive_path)
+    for root in _COLAB_DRIVE_ROOTS:
+        if s.startswith(root):
+            return COLAB_LOCAL_ROOT / s[len(root):]
+    return COLAB_LOCAL_ROOT / drive_path.name
+
+
+def copy_path(src, dst, verbose: bool = True) -> bool:
+    """Copy a file or directory tree from src to dst, replacing dst if it exists.
+
+    Returns True if a copy was performed, False if src does not exist.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    if not src.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if verbose:
+        print(f"Copying {src} -> {dst}")
+    if src.is_dir():
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+    else:
+        if dst.exists():
+            dst.unlink()
+        shutil.copy2(src, dst)
+    return True
 
 
 def make_sequence_fasta(

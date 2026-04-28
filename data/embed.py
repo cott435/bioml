@@ -20,7 +20,7 @@ from .embedding_store import (
     embedding_file_path,
     normalize_storage,
 )
-from .utils import resolve_data_dir
+from .utils import colab_local_path, copy_path, is_colab, resolve_data_dir
 
 """
 Note:
@@ -129,7 +129,7 @@ class ESMCEmbedder:
             return_embeddings=True,
             return_hidden_states=self.include_hidden_states,
         )
-        self._set_model(model_name)
+        self.model = None
 
     @staticmethod
     def _normalize_hidden_layers(hidden_layers):
@@ -142,23 +142,49 @@ class ESMCEmbedder:
     def _set_model(self, model_name: str):
         self.model = ESMC.from_pretrained(model_name, device=self.device)
 
-    def _open_store(self, readonly=False):
-        if self.file_path is None:
+    def ensure_model(self):
+        if self.model is None:
+            self._set_model(self.model_name)
+
+    def _open_store(self, readonly=False, path=None):
+        target = path if path is not None else self.file_path
+        if target is None:
             raise ValueError("save_dir was not provided; cannot open embedding store.")
         if self.storage == "lmdb":
             return LMDBEmbeddingStore(
-                self.file_path,
+                target,
                 readonly=readonly,
                 lock=not readonly,
                 readahead=False,
             )
-        return H5EmbeddingStore(self.file_path, mode="r" if readonly else "a")
+        return H5EmbeddingStore(target, mode="r" if readonly else "a")
 
     def _check_current_ids(self) -> set[str]:
         if self.file_path is None or not self.file_path.exists():
             return set()
         with self._open_store(readonly=True) as store:
             return set(store.list_ids())
+
+    def _begin_local_session(self) -> Path | None:
+        """Prepare a fast working path. In Colab, copies Drive store to local."""
+        if self.file_path is None or not is_colab():
+            return self.file_path
+        local = colab_local_path(self.file_path)
+        if self.file_path.exists():
+            copy_path(self.file_path, local)
+        else:
+            local.parent.mkdir(parents=True, exist_ok=True)
+        return local
+
+    def _end_local_session(self, work_path: Path | None):
+        """In Colab, copy the local working store back to Drive."""
+        if not is_colab() or work_path is None or self.file_path is None:
+            return
+        torch.cuda.empty_cache()
+        if work_path == self.file_path:
+            return
+        if work_path.exists():
+            copy_path(work_path, self.file_path)
 
     def _get_new_ids(self, sequences: dict, force=False) -> dict:
         if force:
@@ -309,18 +335,23 @@ class ESMCBatchEmbedder(ESMCEmbedder):
         if not sequences:
             return 0
 
-        sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
-        batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
+        self.ensure_model()
+        work_path = self._begin_local_session()
+        try:
+            sorted_sequences = sorted(sequences.items(), key=lambda item: len(item[1]))
+            batches = self._batch_tensorize(OrderedDict(sorted_sequences), max_tok_per_batch)
 
-        n_written = 0
-        with self._open_store(readonly=False) as store:
-            for ids, batched_tensors in tqdm(batches, desc="Embedding batches"):
-                split_outputs = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batched_tensors]
-                merged_output = self._merge_split_embeddings(split_outputs)
-                for i, seq_id in enumerate(ids):
-                    record = self._build_record_from_output(merged_output, batch_idx=i, seq_len=len(sequences[seq_id]))
-                    store.write(seq_id, record, overwrite=force)
-                    n_written += 1
+            n_written = 0
+            with self._open_store(readonly=False, path=work_path) as store:
+                for ids, batched_tensors in tqdm(batches, desc="Embedding batches"):
+                    split_outputs = [self.model.logits(protein_tensor, self.emb_config) for protein_tensor in batched_tensors]
+                    merged_output = self._merge_split_embeddings(split_outputs)
+                    for i, seq_id in enumerate(ids):
+                        record = self._build_record_from_output(merged_output, batch_idx=i, seq_len=len(sequences[seq_id]))
+                        store.write(seq_id, record, overwrite=force)
+                        n_written += 1
+        finally:
+            self._end_local_session(work_path)
         return n_written
 
 
@@ -364,13 +395,18 @@ class ESMCForgeEmbedder(ESMCEmbedder):
         if not sequences:
             return 0
 
-        n_written = 0
-        with self._open_store(readonly=False) as store:
-            for seq_id, sequence in tqdm(sequences.items(), desc="Embedding (forge)"):
-                output = self.embed_sequence(sequence)
-                record = self._build_record_from_output(output, batch_idx=0, seq_len=len(sequence))
-                store.write(seq_id, record, overwrite=force)
-                n_written += 1
+        self.ensure_model()
+        work_path = self._begin_local_session()
+        try:
+            n_written = 0
+            with self._open_store(readonly=False, path=work_path) as store:
+                for seq_id, sequence in tqdm(sequences.items(), desc="Embedding (forge)"):
+                    output = self.embed_sequence(sequence)
+                    record = self._build_record_from_output(output, batch_idx=0, seq_len=len(sequence))
+                    store.write(seq_id, record, overwrite=force)
+                    n_written += 1
+        finally:
+            self._end_local_session(work_path)
         return n_written
 
 
@@ -422,29 +458,42 @@ class ESM3Generator:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.file_path = embedding_file_path(self.output_dir, model_name, self.storage)
 
-        self._set_model(model_name)
+        self.model = None
 
     def _set_model(self, model_name: str):
         raise NotImplementedError
 
-    def _open_store(self, readonly=False):
-        if self.file_path is None:
+    def ensure_model(self):
+        if self.model is None:
+            self._set_model(self.model_name)
+
+    def _open_store(self, readonly=False, path=None):
+        target = path if path is not None else self.file_path
+        if target is None:
             raise ValueError("save_dir was not provided; cannot open ESM3 store.")
         if self.storage == "lmdb":
             return LMDBEmbeddingStore(
-                self.file_path,
+                target,
                 readonly=readonly,
                 lock=not readonly,
                 readahead=False,
             )
-        return H5EmbeddingStore(self.file_path, mode="r" if readonly else "a")
+        return H5EmbeddingStore(target, mode="r" if readonly else "a")
 
-    def _load_existing_track_map(self) -> dict[str, set[str]]:
+    def _list_existing_keys(self, path=None) -> set[str]:
+        target = path if path is not None else self.file_path
+        if target is None or not target.exists():
+            return set()
+        with self._open_store(readonly=True, path=target) as store:
+            return set(store.list_ids())
+
+    def _load_existing_track_map(self, path=None) -> dict[str, set[str]]:
         """For each target track, return the set of seq_ids already stored."""
         per_track: dict[str, set[str]] = {t: set() for t in ESM3_TRACKS}
-        if self.file_path is None or not self.file_path.exists():
+        target = path if path is not None else self.file_path
+        if target is None or not target.exists():
             return per_track
-        with self._open_store(readonly=True) as store:
+        with self._open_store(readonly=True, path=target) as store:
             for seq_id in store.list_ids():
                 try:
                     record = store.read(seq_id)
@@ -454,6 +503,24 @@ class ESM3Generator:
                     if track in record and np.asarray(record[track]).size > 0:
                         per_track[track].add(seq_id)
         return per_track
+
+    def _begin_local_session(self) -> Path | None:
+        if self.file_path is None or not is_colab():
+            return self.file_path
+        local = colab_local_path(self.file_path)
+        if self.file_path.exists():
+            copy_path(self.file_path, local)
+        else:
+            local.parent.mkdir(parents=True, exist_ok=True)
+        return local
+
+    def _end_local_session(self, work_path: Path | None):
+        if not is_colab() or work_path is None or self.file_path is None:
+            return
+        if work_path == self.file_path:
+            return
+        if work_path.exists():
+            copy_path(work_path, self.file_path)
 
     def _num_steps_for(self, seq_len: int) -> int:
         if self.num_steps is not None:
@@ -508,54 +575,73 @@ class ESM3Generator:
         if self.file_path is None:
             raise ValueError("save_dir was not provided; cannot persist ESM3 outputs.")
 
-        existing = {t: set() for t in ESM3_TRACKS} if force else self._load_existing_track_map()
+        if not force:
+            existing_keys = self._list_existing_keys()
+            has_pending = any(
+                sid not in existing_keys
+                for sid, seq in sequences.items()
+                if len(seq) <= self.max_seq_len
+            )
+            if not has_pending:
+                return 0
 
-        n_written = 0
-        n_skipped_len = 0
-        with self._open_store(readonly=False) as store:
-            for seq_id, sequence in tqdm(sequences.items(), desc=desc):
-                if len(sequence) > self.max_seq_len:
-                    n_skipped_len += 1
-                    continue
-                if force:
-                    missing = ESM3_TRACKS
-                else:
-                    missing = tuple(t for t in ESM3_TRACKS if seq_id not in existing[t])
-                if not missing:
-                    continue
+        self.ensure_model()
+        work_path = self._begin_local_session()
+        try:
+            existing = (
+                {t: set() for t in ESM3_TRACKS}
+                if force
+                else self._load_existing_track_map(path=work_path)
+            )
 
-                init_structure = None
-                if (
-                    "sasa" in missing
-                    and "structure" not in missing
-                    and store.contains(seq_id)
-                ):
-                    try:
-                        prev = store.read(seq_id)
-                        if "structure" in prev and np.asarray(prev["structure"]).size > 0:
-                            init_structure = prev["structure"]
-                    except Exception:
-                        init_structure = None
+            n_written = 0
+            n_skipped_len = 0
+            with self._open_store(readonly=False, path=work_path) as store:
+                for seq_id, sequence in tqdm(sequences.items(), desc=desc):
+                    if len(sequence) > self.max_seq_len:
+                        n_skipped_len += 1
+                        continue
+                    if force:
+                        missing = ESM3_TRACKS
+                    else:
+                        missing = tuple(t for t in ESM3_TRACKS if seq_id not in existing[t])
+                    if not missing:
+                        continue
 
-                new_record = self.generate(
-                    sequence, init_structure=init_structure
-                )
+                    init_structure = None
+                    if (
+                        "sasa" in missing
+                        and "structure" not in missing
+                        and store.contains(seq_id)
+                    ):
+                        try:
+                            prev = store.read(seq_id)
+                            if "structure" in prev and np.asarray(prev["structure"]).size > 0:
+                                init_structure = prev["structure"]
+                        except Exception:
+                            init_structure = None
 
-                if not force and store.contains(seq_id):
-                    try:
-                        prev = store.read(seq_id)
-                        prev.update(new_record)
-                        new_record = prev
-                    except Exception:
-                        pass
-                store.write(seq_id, new_record, overwrite=True)
-                n_written += 1
-                if max_block and n_written >= max_block:
-                    print("Max limit for session reached. Ending session.")
-                    break
+                    new_record = self.generate(
+                        sequence, init_structure=init_structure
+                    )
 
-        if n_skipped_len:
-            print(f"Skipped {n_skipped_len} sequences exceeding max_seq_len={self.max_seq_len}.")
+                    if not force and store.contains(seq_id):
+                        try:
+                            prev = store.read(seq_id)
+                            prev.update(new_record)
+                            new_record = prev
+                        except Exception:
+                            pass
+                    store.write(seq_id, new_record, overwrite=True)
+                    n_written += 1
+                    if max_block and n_written >= max_block:
+                        print("Max limit for session reached. Ending session.")
+                        break
+
+            if n_skipped_len:
+                print(f"Skipped {n_skipped_len} sequences exceeding max_seq_len={self.max_seq_len}.")
+        finally:
+            self._end_local_session(work_path)
         return n_written
 
 

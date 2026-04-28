@@ -4,7 +4,9 @@
       "Bash(python -c \"import esm; print\\(esm.__version__\\); print\\(esm.__file__\\)\")",
       "Bash(pip show *)",
       "Bash(pip list *)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('data/embed.py'\\).read\\(\\)\\); ast.parse\\(open\\('data/utils.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/connorott/PycharmProjects/bioml/data/embed.py'\\).read\\(\\)\\); ast.parse\\(open\\('/Users/connorott/PycharmProjects/bioml/data/utils.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }
