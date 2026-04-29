@@ -13,6 +13,7 @@ from esm.utils.misc import stack_variable_length_tensors
 from esm.utils.sampling import _BatchedESMProteinTensor
 from tqdm.auto import tqdm
 from os import unlink
+import asyncio
 
 from .embedding_store import (
     H5EmbeddingStore,
@@ -73,7 +74,8 @@ def compute_sasa_from_pdb(pdb_string: str) -> dict:
         f.write(pdb_string)
         path = f.name
     try:
-        structure = freesasa.Structure(path)
+        classifier = freesasa.Classifier.getStandardClassifier('protor')
+        structure = freesasa.Structure(path, classifier)
         result = freesasa.calc(structure)
         residue_areas = result.residueAreas()
         per_res = defaultdict(list)
@@ -413,9 +415,9 @@ class ESMCForgeEmbedder(ESMCEmbedder):
 ESM3_TRACKS = ("structure", "sasa_esm", "sasa_total")
 
 ESM3_FORGE_NAME_MAP = {
-    "esm3_sm_open_v1": "esm3-open-small-2024-03",
-    "esm3_medium_2024_03": "esm3-medium-2024-03",
-    "esm3_large_2024_03": "esm3-large-2024-03",
+    "esm3_sm_open_v1": "esm3-small-2024-03",
+    "esm3_medium_2024_03": "esm3-medium-2024-08",
+    "esm3_large_2024_03": "esm3-large-2024-08",
 }
 
 
@@ -596,6 +598,7 @@ class ESM3Generator:
 
             n_written = 0
             n_skipped_len = 0
+
             with self._open_store(readonly=False, path=work_path) as store:
                 for seq_id, sequence in tqdm(sequences.items(), desc=desc):
                     if len(sequence) > self.max_seq_len:
@@ -608,21 +611,8 @@ class ESM3Generator:
                     if not missing:
                         continue
 
-                    init_structure = None
-                    if (
-                        "sasa" in missing
-                        and "structure" not in missing
-                        and store.contains(seq_id)
-                    ):
-                        try:
-                            prev = store.read(seq_id)
-                            if "structure" in prev and np.asarray(prev["structure"]).size > 0:
-                                init_structure = prev["structure"]
-                        except Exception:
-                            init_structure = None
-
                     new_record = self.generate(
-                        sequence, init_structure=init_structure
+                        sequence
                     )
 
                     if not force and store.contains(seq_id):

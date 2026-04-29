@@ -180,7 +180,6 @@ class SequenceProcessingPipeline:
                 hidden_layers=hidden_layers,
                 max_len=max_len,
                 include_structure=include_structure,
-                include_sasa=include_sasa,
                 esm3_model_name=esm3_name,
             )
         return ESMCPairDS(
@@ -192,6 +191,5 @@ class SequenceProcessingPipeline:
             hidden_layers=hidden_layers,
             max_len=max_len,
             include_structure=include_structure,
-            include_sasa=include_sasa,
             esm3_model_name=esm3_name,
         )

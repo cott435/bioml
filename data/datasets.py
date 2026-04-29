@@ -17,7 +17,8 @@ from .embedding_store import (
 from .parse import data_dir
 from .pre_embed import MultiSequenceDS, SingleSequenceDS
 from .utils import resolve_data_dir
-
+from esm.sdk.api import ESMProtein
+from .embed import compute_sasa_from_pdb
 
 RepresentationMode = Literal["embeddings", "hidden_states", "concat"]
 
@@ -53,23 +54,21 @@ class _EmbeddingReaderMixin:
         data_name: str,
         esm3_model_name: str | None,
         include_structure: bool,
-        include_sasa: bool,
         storage: str,
         allow_storage_fallback: bool,
     ):
         """Open a secondary store for ESM3 structure/sasa outputs if requested.
-        Sets self.esm3_store, self.include_structure, self.include_sasa, self.esm3_extra_dim.
+        Sets self.esm3_store, self.include_structure, self.esm3_extra_dim.
         Returns the set of seq_ids that have ALL requested tracks available, or None if no ESM3.
         """
         self.include_structure = bool(include_structure)
-        self.include_sasa = bool(include_sasa)
         self.esm3_store = None
         self.esm3_extra_dim = 0
-        if not (self.include_structure or self.include_sasa):
+        if not self.include_structure:
             return None
         if esm3_model_name is None:
             raise ValueError(
-                "esm3_model_name must be provided when include_structure or include_sasa is True."
+                "esm3_model_name must be provided when include_structure is True."
             )
         esm3_dir = save_dir / data_name / esm3_model_name
         esm3_path, esm3_storage = self._resolve_storage_path(
@@ -79,11 +78,7 @@ class _EmbeddingReaderMixin:
             allow_storage_fallback=allow_storage_fallback,
         )
         self.esm3_store = _load_store(esm3_path, esm3_storage, readonly=True)
-        required_tracks = []
-        if self.include_structure:
-            required_tracks.append("structure")
-        if self.include_sasa:
-            required_tracks.append("sasa")
+        required_tracks = ['structure' ,'sasa_total'] if self.include_structure else []
 
         ready: set[str] = set()
         for seq_id in self.esm3_store.list_ids():
@@ -98,30 +93,89 @@ class _EmbeddingReaderMixin:
         return ready
 
     def _esm3_feature_vector(self, seq_id: str, seq_len: int) -> np.ndarray:
-        """Return concatenated (structure-flat, sasa) features shape (seq_len, extra_dim)."""
-        if self.esm3_store is None:
-            return np.zeros((seq_len, 0), dtype=np.float32)
-        record = self.esm3_store.read(seq_id)
-        parts = []
-        if self.include_structure:
-            coords = np.asarray(record["structure"], dtype=np.float32)
-            if coords.ndim >= 2:
-                coords = coords.reshape(coords.shape[0], -1)
-            else:
-                coords = coords[:, None]
-            parts.append(coords[:seq_len])
-        if self.include_sasa:
-            sasa = np.asarray(record["sasa"], dtype=np.float32)
-            if sasa.ndim == 1:
-                sasa = sasa[:, None]
-            parts.append(sasa[:seq_len])
-        if not parts:
-            return np.zeros((seq_len, 0), dtype=np.float32)
-        feat = np.concatenate(parts, axis=-1)
-        if feat.shape[0] < seq_len:
-            pad = np.zeros((seq_len - feat.shape[0], feat.shape[1]), dtype=np.float32)
-            feat = np.concatenate([feat, pad], axis=0)
-        return np.nan_to_num(feat, copy=False)
+        """Return concatenated structural features shape (seq_len, extra_dim).
+
+        Features per residue:
+          - plddt (1)
+          - sasa_relativeSideChain (1)
+          - sasa_relativePolar (1)
+          - sasa_relativeApolar (1)
+          - mean_pae_to_3d_neighbors (1)
+        Total: 5 features per residue.
+        """
+        extra_dim = 5
+        try:
+            record = self.esm3_store.read(seq_id)
+        except (KeyError, FileNotFoundError, AttributeError):
+            return np.zeros((seq_len, extra_dim), dtype=np.float32)
+
+        protein = ESMProtein(sequence=self.data.set_index('ID').loc[seq_id, 'Sequence'], coordinates=torch.tensor(record['structure']))
+        pdb_string = protein.to_pdb_string()
+        sasa_info = compute_sasa_from_pdb(pdb_string)
+
+
+        # --- pLDDT (L,) ---
+        plddt = np.asarray(record["plddt"], dtype=np.float32)
+        # Normalize to [0, 1] if it's on the 0-100 scale
+        if plddt.max() > 1.5:
+            plddt = plddt / 100.0
+
+        # TODO: plot this np.stack([record[r] for r in ['sasa_relativeTotal', 'sasa_relativePolar', 'sasa_relativeApolar']])
+
+        # --- Relative SASA features (L,) each ---
+        rel_sc = np.asarray(record["sasa_relativeSideChain"], dtype=np.float32)
+        rel_polar = np.asarray(record["sasa_relativePolar"], dtype=np.float32)
+        rel_apolar = np.asarray(record["sasa_relativeApolar"], dtype=np.float32)
+
+        # FreeSASA emits NaN for residues where relative areas couldn't be computed
+        # (nonstandard residues, missing atoms). Mask those to 0 and let the model
+        # learn from the surrounding context.
+        has_rel = np.asarray(record["sasa_hasRelativeAreas"], dtype=bool)
+        rel_sc = np.where(has_rel, np.nan_to_num(rel_sc, nan=0.0), 0.0)
+        rel_polar = np.where(has_rel, np.nan_to_num(rel_polar, nan=0.0), 0.0)
+        rel_apolar = np.where(has_rel, np.nan_to_num(rel_apolar, nan=0.0), 0.0)
+
+        # --- Mean PAE to 3D neighbors (L,) ---
+        pae = np.asarray(record["pae"], dtype=np.float32)
+        ca_coords = record["structure"][:, 1, :]
+        pae_neighbor = self._mean_pae_to_3d_neighbors(pae, ca_coords, k=10)
+        # PAE is in Å (typically 0-30+). Normalize to roughly [0, 1] for stability.
+        pae_neighbor = np.clip(pae_neighbor / 30.0, 0.0, 1.0)
+
+        # --- Stack and align to seq_len ---
+        feats = np.stack([plddt, rel_sc, rel_polar, rel_apolar, pae_neighbor], axis=1)
+        feats = feats.astype(np.float32)
+
+        # Length safety: pad or truncate to seq_len in case of off-by-one mismatches
+        L = feats.shape[0]
+        if L == seq_len:
+            return feats
+        if L > seq_len:
+            return feats[:seq_len]
+        padded = np.zeros((seq_len, extra_dim), dtype=np.float32)
+        padded[:L] = feats
+        return padded
+
+    @staticmethod
+    def _mean_pae_to_3d_neighbors(
+            pae: np.ndarray, ca_coords: np.ndarray, k: int = 10
+    ) -> np.ndarray:
+        """Mean PAE from residue i to its k nearest 3D neighbors. Returns (L,)."""
+        L = ca_coords.shape[0]
+        if L == 0:
+            return np.zeros(0, dtype=np.float32)
+        if L == 1:
+            return np.zeros(1, dtype=np.float32)
+
+        diffs = ca_coords[:, None, :] - ca_coords[None, :, :]
+        dist = np.linalg.norm(diffs, axis=-1)
+        np.fill_diagonal(dist, np.inf)  # exclude self
+
+        k_eff = min(k, L - 1)
+        neighbor_idx = np.argpartition(dist, kth=k_eff - 1, axis=1)[:, :k_eff]
+        rows = np.arange(L)[:, None]
+        pae_to_neighbors = pae[rows, neighbor_idx]
+        return pae_to_neighbors.mean(axis=1).astype(np.float32)
 
     @staticmethod
     def _normalize_hidden_layers(hidden_layers):
@@ -211,7 +265,6 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         representation: RepresentationMode = "embeddings",
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         include_structure: bool = False,
-        include_sasa: bool = False,
         esm3_model_name: str | None = None,
     ):
         super().__init__(
@@ -248,7 +301,6 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
             data_name=data_name,
             esm3_model_name=esm3_model_name,
             include_structure=include_structure,
-            include_sasa=include_sasa,
             storage=storage,
             allow_storage_fallback=allow_storage_fallback,
         )
@@ -296,15 +348,16 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         return len(self.data)
 
     def _get_embedding(self, seq_id: str) -> np.ndarray:
-        record = self.store.read(seq_id)
-        emb = self._build_representation(record).astype(np.float32, copy=False)
-        if self.include_structure or self.include_sasa:
-            extras = self._esm3_feature_vector(seq_id, seq_len=emb.shape[0])
-            if extras.shape[0] != emb.shape[0]:
-                min_len = min(extras.shape[0], emb.shape[0])
+        emb_record = self.store.read(seq_id)
+        emb = self._build_representation(emb_record).astype(np.float32, copy=False)
+        if self.include_structure:
+            structure_record = self._esm3_feature_vector(seq_id, seq_len=emb.shape[0])
+            if structure_record.shape[0] != emb.shape[0]:
+                """min_len = min(structure_record.shape[0], emb.shape[0])
                 emb = emb[:min_len]
-                extras = extras[:min_len]
-            emb = np.concatenate([emb, extras], axis=-1)
+                structure_record = structure_record[:min_len]"""
+                raise ValueError("ESM3 records have a different length than ESMC embeddings.")
+            emb = np.concatenate([emb, structure_record], axis=-1)
         return emb
 
     def __getitem__(self, idx):
@@ -401,7 +454,6 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
         representation: RepresentationMode = "embeddings",
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         include_structure: bool = False,
-        include_sasa: bool = False,
         esm3_model_name: str | None = None,
     ):
         super().__init__(
@@ -436,7 +488,6 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
             data_name=data_name,
             esm3_model_name=esm3_model_name,
             include_structure=include_structure,
-            include_sasa=include_sasa,
             storage=storage,
             allow_storage_fallback=allow_storage_fallback,
         )

@@ -29,7 +29,8 @@ def main(tdc=False, max_block=None, embed=True):
             hidden_layers=[1, 5, 10, 15, 20, 25],
             device=device,
             temperature=1e-6,
-            max_block=max_block
+            max_block=max_block,
+            embedder_kind='forge'
         )
     else:
         train_ds = pipe.build_training_dataset(
