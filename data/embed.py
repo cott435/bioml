@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from esm.models.esmc import ESMC
 from esm.sdk import client
-from esm.sdk.api import ESMProtein, ESMProteinTensor, GenerationConfig, LogitsConfig, LogitsOutput
+from esm.sdk.api import ESMProtein, ESMProteinTensor, GenerationConfig, LogitsConfig, LogitsOutput, ESMProteinError
 from esm.utils.misc import stack_variable_length_tensors
 from esm.utils.sampling import _BatchedESMProteinTensor
 from tqdm.auto import tqdm
@@ -64,6 +64,65 @@ def _to_numpy_dtype(dtype) -> np.dtype:
     raise ValueError(f"Unsupported dtype '{dtype}'. Use float16 or float32.")
 
 
+class _RateLimitReached(Exception):
+    pass
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in ("429", "rate limit", "too many requests", "quota"))
+
+
+class _RateLimiter:
+    """Async sliding-window limiter enforcing both requests-per-minute and tokens-per-minute."""
+
+    def __init__(self, rpm: int, tpm: int | None = None):
+        from collections import deque
+
+        self.rpm = max(1, int(rpm))
+        self.tpm = int(tpm) if tpm else None
+        self._lock = asyncio.Lock()
+        self._events = deque()  # (expiry_time, tokens)
+        self._req_count = 0
+        self._tok_count = 0
+
+    async def acquire(self, tokens: int = 1):
+        while True:
+            async with self._lock:
+                loop = asyncio.get_event_loop()
+                now = loop.time()
+                while self._events and self._events[0][0] <= now:
+                    _, tok = self._events.popleft()
+                    self._req_count -= 1
+                    self._tok_count -= tok
+                req_ok = self._req_count + 1 <= self.rpm
+                tok_ok = self.tpm is None or self._tok_count + tokens <= self.tpm
+                if req_ok and tok_ok:
+                    self._events.append((now + 60.0, tokens))
+                    self._req_count += 1
+                    self._tok_count += tokens
+                    return
+                wait = (self._events[0][0] - now) if self._events else 0.1
+            await asyncio.sleep(max(wait, 0.05))
+
+
+async def _async_call(rate_limiter: _RateLimiter, tokens: int, fn, *args, **kwargs):
+    await rate_limiter.acquire(tokens)
+    try:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    except Exception as exc:
+        if _is_rate_limit_error(exc):
+            raise _RateLimitReached(str(exc)) from exc
+        raise
+
+
+async def _cancel_pending(tasks):
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def compute_sasa_from_pdb(pdb_string: str) -> dict:
     import freesasa
     """Per-residue SASA (Å²) via FreeSASA. Deterministic, geometry-based."""
@@ -74,8 +133,7 @@ def compute_sasa_from_pdb(pdb_string: str) -> dict:
         f.write(pdb_string)
         path = f.name
     try:
-        classifier = freesasa.Classifier.getStandardClassifier('protor')
-        structure = freesasa.Structure(path, classifier)
+        structure = freesasa.Structure(path)
         result = freesasa.calc(structure)
         residue_areas = result.residueAreas()
         per_res = defaultdict(list)
@@ -384,10 +442,30 @@ class ESMCForgeEmbedder(ESMCEmbedder):
         )
         self.hidden_layer_offset = 1
 
+    MAX_RPM = 500
+    MAX_TPM = 200_000
+    MAX_CONCURRENT = 50
+
     def _set_model(self, model_name):
         api_name = model_name + "-2024-12" if "-2024-12" not in model_name else model_name
         api_name = api_name.replace("_", "-")
         self.model = client(api_name, url="https://forge.evolutionaryscale.ai", token=self.token)
+
+    async def _aembed_sequence(self, sequence: str, rate_limiter: _RateLimiter) -> LogitsOutput:
+        protein = ESMProtein(sequence=sequence)
+        protein_tensor = await _async_call(rate_limiter, len(sequence), self.model.encode, protein)
+        protein_tensors = self._split_tensor_sequences(protein_tensor)
+        outputs = await asyncio.gather(*[
+            _async_call(rate_limiter, int(pt.sequence.shape[-1]), self.model.logits, pt, self.emb_config)
+            for pt in protein_tensors
+        ])
+        return self._merge_split_embeddings(list(outputs))
+
+    async def _aprocess_one(self, sem, rate_limiter, seq_id, sequence):
+        async with sem:
+            output = await self._aembed_sequence(sequence, rate_limiter)
+            record = self._build_record_from_output(output, batch_idx=0, seq_len=len(sequence))
+            return seq_id, record
 
     def batch_save(self, sequences: dict, force=False):
         if self.file_path is None:
@@ -398,21 +476,40 @@ class ESMCForgeEmbedder(ESMCEmbedder):
             return 0
 
         self.ensure_model()
+        return asyncio.run(self._abatch_save(sequences, force))
+
+    async def _abatch_save(self, sequences: dict, force: bool) -> int:
+        rate_limiter = _RateLimiter(self.MAX_RPM, tpm=getattr(self, "MAX_TPM", None))
+        sem = asyncio.Semaphore(self.MAX_CONCURRENT)
+
         work_path = self._begin_local_session()
+        n_written = 0
         try:
-            n_written = 0
+            tasks = [
+                asyncio.create_task(self._aprocess_one(sem, rate_limiter, sid, seq))
+                for sid, seq in sequences.items()
+            ]
             with self._open_store(readonly=False, path=work_path) as store:
-                for seq_id, sequence in tqdm(sequences.items(), desc="Embedding (forge)"):
-                    output = self.embed_sequence(sequence)
-                    record = self._build_record_from_output(output, batch_idx=0, seq_len=len(sequence))
-                    store.write(seq_id, record, overwrite=force)
-                    n_written += 1
+                pbar = tqdm(total=len(tasks), desc="Embedding (forge async)")
+                try:
+                    for fut in asyncio.as_completed(tasks):
+                        try:
+                            seq_id, record = await fut
+                        except _RateLimitReached as e:
+                            print(f"Rate limit reached: {e}. Stopping session.")
+                            await _cancel_pending(tasks)
+                            break
+                        store.write(seq_id, record, overwrite=force)
+                        n_written += 1
+                        pbar.update(1)
+                finally:
+                    pbar.close()
         finally:
             self._end_local_session(work_path)
         return n_written
 
 
-ESM3_TRACKS = ("structure", "sasa_esm", "sasa_total")
+ESM3_TRACKS = ("structure", "sasa_total")
 
 ESM3_FORGE_NAME_MAP = {
     "esm3_sm_open_v1": "esm3-small-2024-03",
@@ -524,10 +621,11 @@ class ESM3Generator:
         if work_path.exists():
             copy_path(work_path, self.file_path)
 
-    def _num_steps_for(self, seq_len: int) -> int:
+    def _num_steps_for(self, seq_len: int, sasa=False) -> int:
         if self.num_steps is not None:
             return max(1, int(self.num_steps))
-        return max(1, seq_len // 8)
+        div = 50 if sasa else 25
+        return min(100, max(8, seq_len // div))
 
     @staticmethod
     def _to_numpy(value) -> np.ndarray:
@@ -657,6 +755,10 @@ class ESM3LocalGenerator(ESM3Generator):
 
 
 class ESM3ForgeGenerator(ESM3Generator):
+    MAX_RPM = 20
+    MAX_TPM = 200_000
+    MAX_CONCURRENT = 10
+
     def __init__(self, forge_token: str | None = None, **kwargs):
         self.forge_token = get_token(forge_token)
         kwargs.setdefault("device", "cpu")
@@ -672,3 +774,129 @@ class ESM3ForgeGenerator(ESM3Generator):
     def _set_model(self, model_name: str):
         api_name = self._resolve_forge_name(model_name)
         self.model = client(api_name, url="https://forge.evolutionaryscale.ai", token=self.forge_token)
+
+    async def _agenerate_api(self, sequence: str, rate_limiter: _RateLimiter) -> tuple[dict, str]:
+        """API-only portion of generate(): structure + esm-sasa tracks. Returns (outputs, pdb_string).
+
+        Local freesasa is intentionally deferred to the consumer so it doesn't
+        consume async slots or count against API rate limits.
+        """
+        protein = ESMProtein(sequence=sequence)
+        steps = 1 if (self.device.type == "cpu" and isinstance(self, ESM3LocalGenerator)) else self._num_steps_for(len(sequence))
+
+        config = GenerationConfig(track="structure", num_steps=steps, temperature=self.temperature)
+        protein = await _async_call(rate_limiter, len(sequence) * steps, self.model.generate, protein, config)
+        if isinstance(protein, ESMProteinError):
+            return {'error_code': protein.error_code, 'error_msg': protein.error_msg}, 'error'
+        outputs: dict = {
+            "structure": self._to_numpy(protein.coordinates),
+            "plddt": self._to_numpy(protein.plddt),
+        }
+        if protein.ptm is not None:
+            outputs["ptm"] = self._to_numpy(protein.ptm)
+        if protein.pae is not None:
+            outputs["pae"] = self._to_numpy(protein.pae)[0]
+
+        steps = 1 if (self.device.type == "cpu" and isinstance(self, ESM3LocalGenerator)) else self._num_steps_for(
+            len(sequence), sasa=True)
+        config = GenerationConfig(track="sasa", num_steps=steps, temperature=self.temperature)
+        protein_ = await _async_call(rate_limiter, len(sequence) * steps, self.model.generate, protein, config)
+        if isinstance(protein_, ESMProteinError):
+            return outputs, protein.to_pdb_string()
+        outputs["sasa_esm"] = self._to_numpy(protein_.sasa)
+        pdb_string = protein_.to_pdb_string()
+        return outputs, pdb_string
+
+    async def _aprocess_one(self, sem, rate_limiter, seq_id, sequence):
+        async with sem:
+            outputs, pdb_string = await self._agenerate_api(sequence, rate_limiter)
+            return seq_id, outputs, pdb_string
+
+    def batch_save(self, sequences: dict, force: bool = False, desc: str = "ESM3 generating", max_block=None):
+        if self.file_path is None:
+            raise ValueError("save_dir was not provided; cannot persist ESM3 outputs.")
+
+        if not force:
+            existing_keys = self._list_existing_keys()
+            has_pending = any(
+                sid not in existing_keys
+                for sid, seq in sequences.items()
+                if len(seq) <= self.max_seq_len
+            )
+            if not has_pending:
+                return 0
+
+        self.ensure_model()
+        return asyncio.run(self._abatch_save(sequences, force, desc, max_block))
+
+    async def _abatch_save(self, sequences: dict, force: bool, desc: str, max_block) -> int:
+        rate_limiter = _RateLimiter(self.MAX_RPM, tpm=getattr(self, "MAX_TPM", None))
+        sem = asyncio.Semaphore(self.MAX_CONCURRENT)
+
+        work_path = self._begin_local_session()
+        n_written = 0
+        n_skipped_len = 0
+        errors = []
+        try:
+            existing = (
+                {t: set() for t in ESM3_TRACKS}
+                if force
+                else self._load_existing_track_map(path=work_path)
+            )
+
+            pending: list[tuple[str, str]] = []
+            for seq_id, sequence in sequences.items():
+                if len(sequence) > self.max_seq_len:
+                    n_skipped_len += 1
+                    continue
+                if force:
+                    missing = ESM3_TRACKS
+                else:
+                    missing = tuple(t for t in ESM3_TRACKS if seq_id not in existing[t])
+                if not missing:
+                    continue
+                pending.append((seq_id, sequence))
+
+            tasks = [
+                asyncio.create_task(self._aprocess_one(sem, rate_limiter, sid, seq))
+                for sid, seq in pending
+            ]
+
+            with self._open_store(readonly=False, path=work_path) as store:
+                pbar = tqdm(total=len(tasks), desc=desc)
+                try:
+                    for fut in asyncio.as_completed(tasks):
+                        try:
+                            seq_id, outputs, pdb_string = await fut
+                        except _RateLimitReached as e:
+                            print(f"Rate limit reached: {e}. Stopping session.")
+                            await _cancel_pending(tasks)
+                            break
+                        if pdb_string == 'error':
+                            errors.append((seq_id, outputs))
+                            pbar.update(1)
+                            continue
+                        outputs.update(compute_sasa_from_pdb(pdb_string))
+
+                        if not force and store.contains(seq_id):
+                            try:
+                                prev = store.read(seq_id)
+                                prev.update(outputs)
+                                outputs = prev
+                            except Exception:
+                                pass
+                        store.write(seq_id, outputs, overwrite=True)
+                        n_written += 1
+                        pbar.update(1)
+                        if max_block and n_written >= max_block:
+                            print("Max limit for session reached. Ending session.")
+                            await _cancel_pending(tasks)
+                            break
+                finally:
+                    pbar.close()
+
+            if n_skipped_len:
+                print(f"Skipped {n_skipped_len} sequences exceeding max_seq_len={self.max_seq_len}.")
+        finally:
+            self._end_local_session(work_path)
+        return n_written
