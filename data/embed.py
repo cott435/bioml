@@ -86,6 +86,17 @@ class _RateLimiter:
         self._req_count = 0
         self._tok_count = 0
 
+    async def release(self, tokens: int = 1):
+        """Refund a previously-acquired slot (e.g., when the API returned an
+        error that does not count against the user's quota)."""
+        async with self._lock:
+            for i in range(len(self._events) - 1, -1, -1):
+                if self._events[i][1] == tokens:
+                    del self._events[i]
+                    break
+            self._req_count = max(0, self._req_count - 1)
+            self._tok_count = max(0, self._tok_count - tokens)
+
     async def acquire(self, tokens: int = 1):
         while True:
             async with self._lock:
@@ -785,8 +796,10 @@ class ESM3ForgeGenerator(ESM3Generator):
         steps = 1 if (self.device.type == "cpu" and isinstance(self, ESM3LocalGenerator)) else self._num_steps_for(len(sequence))
 
         config = GenerationConfig(track="structure", num_steps=steps, temperature=self.temperature)
-        protein = await _async_call(rate_limiter, len(sequence) * steps, self.model.generate, protein, config)
+        struct_tokens = len(sequence) * steps
+        protein = await _async_call(rate_limiter, struct_tokens, self.model.generate, protein, config)
         if isinstance(protein, ESMProteinError):
+            await rate_limiter.release(struct_tokens)
             return {'error_code': protein.error_code, 'error_msg': protein.error_msg}, 'error'
         outputs: dict = {
             "structure": self._to_numpy(protein.coordinates),
@@ -800,8 +813,10 @@ class ESM3ForgeGenerator(ESM3Generator):
         steps = 1 if (self.device.type == "cpu" and isinstance(self, ESM3LocalGenerator)) else self._num_steps_for(
             len(sequence), sasa=True)
         config = GenerationConfig(track="sasa", num_steps=steps, temperature=self.temperature)
-        protein_ = await _async_call(rate_limiter, len(sequence) * steps, self.model.generate, protein, config)
+        sasa_tokens = len(sequence) * steps
+        protein_ = await _async_call(rate_limiter, sasa_tokens, self.model.generate, protein, config)
         if isinstance(protein_, ESMProteinError):
+            await rate_limiter.release(sasa_tokens)
             return outputs, protein.to_pdb_string()
         outputs["sasa_esm"] = self._to_numpy(protein_.sasa)
         pdb_string = protein_.to_pdb_string()
