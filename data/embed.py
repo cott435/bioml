@@ -550,7 +550,8 @@ class ESM3Generator:
         max_seq_len: int = 2048,
         device: torch.device | str = "cpu",
         num_steps: int | None = None,
-        temperature=1.0
+        temperature=1.0,
+        gen_type='local'
     ):
         self.storage = normalize_storage(storage)
         self.numpy_dtype = _to_numpy_dtype(dtype)
@@ -566,7 +567,7 @@ class ESM3Generator:
             resolved = resolve_data_dir(save_dir)
             self.output_dir = resolved / model_name
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.file_path = embedding_file_path(self.output_dir, model_name, self.storage)
+            self.file_path = embedding_file_path(self.output_dir, gen_type, self.storage)
 
         self.model = None
 
@@ -747,7 +748,7 @@ class ESM3Generator:
 class ESM3LocalGenerator(ESM3Generator):
     def __init__(self, hf_token: str | None = None, **kwargs):
         self.hf_token = get_hf_token(hf_token)
-        super().__init__(**kwargs)
+        super().__init__(**kwargs, gen_type='local')
 
     def _set_model(self, model_name: str):
         if self.hf_token:
@@ -773,7 +774,7 @@ class ESM3ForgeGenerator(ESM3Generator):
     def __init__(self, forge_token: str | None = None, **kwargs):
         self.forge_token = get_token(forge_token)
         kwargs.setdefault("device", "cpu")
-        super().__init__(**kwargs)
+        super().__init__(**kwargs, gen_type='forge')
 
     def _resolve_forge_name(self, model_name: str) -> str:
         if model_name in ESM3_FORGE_NAME_MAP:

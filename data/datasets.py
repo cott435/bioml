@@ -32,15 +32,15 @@ def _load_store(path: Path, storage: str, readonly: bool):
 
 
 class _EmbeddingReaderMixin:
-    def _resolve_storage_path(self, model_name: str, model_dir: Path, storage: str, allow_storage_fallback: bool):
+    def _resolve_storage_path(self, gen_type, model_dir: Path, storage: str, allow_storage_fallback: bool):
         storage = normalize_storage(storage)
-        requested = embedding_file_path(model_dir, model_name, storage)
+        requested = embedding_file_path(model_dir, gen_type, storage)
         if requested.exists():
             return requested, storage
 
         if allow_storage_fallback:
             fallback_storage = "h5" if storage == "lmdb" else "lmdb"
-            fallback = embedding_file_path(model_dir, model_name, fallback_storage)
+            fallback = embedding_file_path(model_dir, gen_type, fallback_storage)
             if fallback.exists():
                 return fallback, fallback_storage
         raise FileNotFoundError(
@@ -52,6 +52,7 @@ class _EmbeddingReaderMixin:
         self,
         save_dir: Path,
         data_name: str,
+        gen_type: str,
         esm3_model_name: str | None,
         include_structure: bool,
         storage: str,
@@ -72,7 +73,7 @@ class _EmbeddingReaderMixin:
             )
         esm3_dir = save_dir / data_name / esm3_model_name
         esm3_path, esm3_storage = self._resolve_storage_path(
-            model_name=esm3_model_name,
+            gen_type=gen_type,
             model_dir=esm3_dir,
             storage=storage,
             allow_storage_fallback=allow_storage_fallback,
@@ -258,6 +259,7 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         column_map=None,
         save_dir=data_dir,
         force=False,
+        gen_type='local',
         missing: Literal["raise", "remove"] = "remove",
         max_len=5000,
         storage: str = "lmdb",
@@ -288,7 +290,7 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         self.hidden_layers = self._normalize_hidden_layers(hidden_layers)
 
         self.file_path, self.storage = self._resolve_storage_path(
-            model_name=model_name,
+            gen_type='local',
             model_dir=self.model_dir,
             storage=storage,
             allow_storage_fallback=allow_storage_fallback,
@@ -299,6 +301,7 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         esm3_ready_ids = self._setup_esm3_store(
             save_dir=save_dir,
             data_name=data_name,
+            gen_type=gen_type,
             esm3_model_name=esm3_model_name,
             include_structure=include_structure,
             storage=storage,
@@ -386,32 +389,6 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
             for seq_id in tqdm(self.store.list_ids(), desc="Converting to LMDB"):
                 writer.write(seq_id, self.store.read(seq_id), overwrite=overwrite)
         return target
-
-    def save_full_embedding(self, float16=True):
-        emb_list = []
-        offsets = []
-        lengths = []
-        labels = []
-
-        offset = 0
-        for i, seq_id in enumerate(tqdm(self.ids, desc="Packing embeddings")):
-            emb = self._get_embedding(seq_id)
-            y = self._build_token_labels(self.labels[i], emb.shape[0]).numpy().astype(np.float32, copy=False)
-            emb_list.append(emb)
-            labels.append(y)
-            offsets.append(offset)
-            lengths.append(len(emb))
-            offset += len(emb)
-
-        embeddings = np.concatenate(emb_list, axis=0)
-        if float16:
-            embeddings = embeddings.astype(np.float16, copy=False)
-
-        base = self.model_dir
-        np.save(base / "embeddings.npy", embeddings)
-        np.save(base / "offsets.npy", np.asarray(offsets, dtype=np.int64))
-        np.save(base / "lengths.npy", np.asarray(lengths, dtype=np.int64))
-        np.save(base / "labels.npy", np.concatenate(labels).astype(np.float32, copy=False))
 
     def heatmap(self, idx: int | list[int]):
         if isinstance(idx, list):

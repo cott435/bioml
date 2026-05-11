@@ -45,4 +45,4 @@ def main(tdc=False, max_block=None, embed=True):
 
 
 if __name__ == "__main__":
-    main()
+    main(embed=False)
