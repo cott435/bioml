@@ -9,6 +9,7 @@ from typing import Iterable, List
 from pathlib import Path
 from dataclasses import asdict
 import csv
+from tensordict import TensorDict
 
 
 def resolve_data_dir(save_dir) -> Path:
@@ -205,8 +206,8 @@ def bucket_collate_fn(batch, rel_thresh=0.15):
     """
     sort greedily within given percent
     """
-    sorted_batch = sorted(batch, key=lambda x: len(x[0]))
-    lengths = torch.tensor([x.shape[0] for x, _ in sorted_batch], dtype=torch.long)
+    sorted_batch = sorted(batch, key=lambda x: len(x[1]))
+    lengths = torch.tensor([y.shape[0] for _, y in sorted_batch], dtype=torch.long)
 
     sub_batches = []
     i = 0
@@ -227,10 +228,10 @@ def bucket_collate_fn(batch, rel_thresh=0.15):
         x_padded = pad_sequence(xs, batch_first=True, padding_value=0.0)
         y_padded = pad_sequence(ys, batch_first=True, padding_value=0.0)  # adjust value if needed
 
-        lengths_tensor = torch.tensor([x.shape[0] for x in xs], dtype=torch.long)
-        max_len = x_padded.shape[1]
+        lengths_tensor = torch.tensor([y.shape[0] for y in ys], dtype=torch.long)
+        max_len = y_padded.shape[1]
         mask = (
-                torch.arange(max_len, device=x_padded.device)[None, :]
+                torch.arange(max_len, device=y_padded.device)[None, :]
                 < lengths_tensor[:, None]
         )
 

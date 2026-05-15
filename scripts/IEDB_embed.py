@@ -37,11 +37,11 @@ def main(tdc=False, max_block=None, embed=True):
             storage="lmdb",
             representation="concat",
             hidden_layers=[1, 10, 20],
-            include_sasa=True,
             include_structure=True,
+            include_embedding=False
         )
 
-        d = train_ds[0]
+        d = train_ds.plot(0)
 
 
 if __name__ == "__main__":

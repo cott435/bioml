@@ -166,20 +166,22 @@ class SequenceProcessingPipeline:
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         max_len: int = 5000,
         include_structure: bool = True,
-        include_sasa: bool = True,
+        include_embedding=True,
         esm3_model_name: str = "esm3_sm_open_v1",
     ):
-        esm3_name = esm3_model_name if (include_structure or include_sasa) else None
+        esm3_name = esm3_model_name if include_structure else None
         if self.sequence_kind == "single":
             return ESMCSingleDS(
                 self.data_name,
                 self.model_name,
+                gen_type='forge',
                 save_dir=self.save_dir,
                 storage=storage,
                 representation=representation,
                 hidden_layers=hidden_layers,
                 max_len=max_len,
                 include_structure=include_structure,
+                include_embedding=include_embedding,
                 esm3_model_name=esm3_name,
             )
         return ESMCPairDS(

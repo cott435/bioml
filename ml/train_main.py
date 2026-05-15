@@ -4,11 +4,11 @@ from ml.datasets import ESMCTokenFrameBuilder
 from ml.pipeline import MLBaselinePipeline, default_model_specs
 from ml.splits import GroupKFoldSplitStrategy, SingleGroupSplitStrategy
 from ml.utils import set_global_seed
+from data import SequenceProcessingPipeline
 
 
 def main(test_name, max_tokens=200000, include_linear=True, include_nonlinear_svm=False, include_trees=False, rolling_ave=None) -> None:
     data_name = "IEDB_Jespersen"
-    model_name = "esmc_300m"
     base_dir = Path(__file__).absolute().parents[1]
     base_data_dir = base_dir / "data" / "data_files"
 
@@ -25,7 +25,17 @@ def main(test_name, max_tokens=200000, include_linear=True, include_nonlinear_sv
 
     set_global_seed(seed)
 
-    dataset = ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+    pipe = SequenceProcessingPipeline(
+        data_name=data_name,
+        sequence_kind="single",
+        save_dir=base_data_dir,
+    )
+
+    dataset = pipe.build_training_dataset(
+        storage="lmdb",
+        include_embedding=False,
+        include_structure=True
+    )
     token_dataset = ESMCTokenFrameBuilder(dataset, seed=seed).build(max_tokens=max_tokens, rolling_ave=rolling_ave)
 
     split_strategy = (
@@ -66,4 +76,4 @@ def main(test_name, max_tokens=200000, include_linear=True, include_nonlinear_sv
 
 
 if __name__ == "__main__":
-    main('rolling_avv', rolling_ave=5)
+    main('structure_only', include_trees=True)

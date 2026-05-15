@@ -135,7 +135,7 @@ class TokenTrainer:
     def _accumulate_grads(self, batch):
         accumulated_loss = 0
         total_valid_tokens = sum([s[2].sum().item() for s in batch])
-        total_b = sum([len(s[0]) for s in batch])
+        total_b = sum([len(s[1]) for s in batch])
         for embeds, targets, mask in batch:
             embeds, targets, mask = embeds.to(self.device), targets.to(self.device), mask.to(self.device)
             noise = torch.randn_like(embeds) * self.jitter

@@ -5,13 +5,24 @@ from data.utils import pad_collate_fn
 from models.crf import LinearChainCRF
 from training import OptunaSearch, TrainingPipeline, TokenTrainer, SinglePipeline, GridSearch
 from models import TokenActivationHead, TokenActivationLSTM
-
+from data import SequenceProcessingPipeline
 
 
 data_name = 'IEDB_Jespersen'
-model_name = 'esmc_300m'
 base_data_dir = Path.cwd().parents[0]  / 'data'/ 'data_files'
-dataset = ESMCSingleDS(data_name, model_name, save_dir=base_data_dir, max_len=3000)
+
+pipe = SequenceProcessingPipeline(
+        data_name=data_name,
+        sequence_kind="single",
+        save_dir=base_data_dir,
+)
+
+dataset = pipe.build_training_dataset(
+        storage="lmdb",
+        include_embedding=True,
+        include_structure=True
+)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
 results_dir = Path.cwd().parents[0] / 'experiments' / 'lstm'
 

@@ -133,6 +133,17 @@ async def _cancel_pending(tasks):
             t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
+NONCANONICAL_MAP = {
+    'B': 'D',  # Asx → Asp (more common than Asn statistically)
+    'Z': 'E',  # Glx → Glu
+    'J': 'L',  # Xle → Leu
+    'U': 'C',  # Selenocysteine → Cys (chemically closest)
+    'O': 'K',  # Pyrrolysine → Lys (chemically closest)
+    'X': 'A',  # Unknown → Ala (smallest, least disruptive)
+}
+
+def canonicalize(seq: str) -> str:
+    return "".join(NONCANONICAL_MAP.get(c, c) for c in seq)
 
 def compute_sasa_from_pdb(pdb_string: str) -> dict:
     import freesasa
@@ -176,6 +187,7 @@ class ESMCEmbedder:
         max_seq_len=2000,
         seq_overlap=250,
         device: torch.device | str = "cpu",
+        gen_type='local'
     ):
         self.storage = normalize_storage(storage)
         self.include_hidden_states = bool(include_hidden_states)
@@ -193,7 +205,7 @@ class ESMCEmbedder:
             resolved = resolve_data_dir(save_dir)
             self.output_dir = resolved / model_name
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.file_path = embedding_file_path(self.output_dir, model_name, self.storage)
+            self.file_path = embedding_file_path(self.output_dir, gen_type, self.storage)
 
         self.emb_config = LogitsConfig(
             sequence=True,
@@ -450,6 +462,7 @@ class ESMCForgeEmbedder(ESMCEmbedder):
             max_seq_len=max_seq_len,
             seq_overlap=seq_overlap,
             device="cpu",
+            gen_type='forge'
         )
         self.hidden_layer_offset = 1
 
@@ -818,8 +831,10 @@ class ESM3ForgeGenerator(ESM3Generator):
         protein_ = await _async_call(rate_limiter, sasa_tokens, self.model.generate, protein, config)
         if isinstance(protein_, ESMProteinError):
             await rate_limiter.release(sasa_tokens)
+            protein.sequence = canonicalize(sequence)
             return outputs, protein.to_pdb_string()
         outputs["sasa_esm"] = self._to_numpy(protein_.sasa)
+        protein_.sequence = canonicalize(sequence)
         pdb_string = protein_.to_pdb_string()
         return outputs, pdb_string
 
@@ -869,7 +884,7 @@ class ESM3ForgeGenerator(ESM3Generator):
                     missing = ESM3_TRACKS
                 else:
                     missing = tuple(t for t in ESM3_TRACKS if seq_id not in existing[t])
-                if not missing:
+                if not missing and not any([k in sequence for k in NONCANONICAL_MAP]):
                     continue
                 pending.append((seq_id, sequence))
 

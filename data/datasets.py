@@ -93,7 +93,7 @@ class _EmbeddingReaderMixin:
                 ready.add(seq_id)
         return ready
 
-    def _esm3_feature_vector(self, seq_id: str, seq_len: int) -> np.ndarray:
+    def _esm3_feature_vector(self, seq_id: str) -> np.ndarray:
         """Return concatenated structural features shape (seq_len, extra_dim).
 
         Features per residue:
@@ -104,58 +104,33 @@ class _EmbeddingReaderMixin:
           - mean_pae_to_3d_neighbors (1)
         Total: 5 features per residue.
         """
-        extra_dim = 5
-        try:
-            record = self.esm3_store.read(seq_id)
-        except (KeyError, FileNotFoundError, AttributeError):
-            return np.zeros((seq_len, extra_dim), dtype=np.float32)
-
-        protein = ESMProtein(sequence=self.data.set_index('ID').loc[seq_id, 'Sequence'], coordinates=torch.tensor(record['structure']))
-        pdb_string = protein.to_pdb_string()
-        sasa_info = compute_sasa_from_pdb(pdb_string)
-
-
-        # --- pLDDT (L,) ---
+        record = self.esm3_store.read(seq_id)
         plddt = np.asarray(record["plddt"], dtype=np.float32)
-        # Normalize to [0, 1] if it's on the 0-100 scale
         if plddt.max() > 1.5:
             plddt = plddt / 100.0
 
-        # TODO: plot this np.stack([record[r] for r in ['sasa_relativeTotal', 'sasa_relativePolar', 'sasa_relativeApolar']])
+        has_rel = np.asarray(record["sasa_hasRelativeAreas"], dtype=bool)
+        if self.gen_type == 'forge':
+            extra = np.asarray(record["sasa_relativeSideChain"], dtype=np.float32)
+            extra = np.where(has_rel, np.nan_to_num(extra, nan=0.0), 0.0)
+        else:
+            # --- Mean PAE to 3D neighbors (L,) ---
+            pae = np.asarray(record["pae"], dtype=np.float32)
+            ca_coords = record["structure"][:, 1, :]
+            pae_neighbor = self._mean_pae_to_3d_neighbors(pae, ca_coords, k=10)
+            # PAE is in Å (typically 0-30+). Normalize to roughly [0, 1] for stability.
+            extra = np.clip(pae_neighbor / 30.0, 0.0, 1.0)
 
-        # --- Relative SASA features (L,) each ---
-        rel_sc = np.asarray(record["sasa_relativeSideChain"], dtype=np.float32)
         rel_polar = np.asarray(record["sasa_relativePolar"], dtype=np.float32)
         rel_apolar = np.asarray(record["sasa_relativeApolar"], dtype=np.float32)
+        rel_total = np.asarray(record["sasa_relativeTotal"], dtype=np.float32)
 
-        # FreeSASA emits NaN for residues where relative areas couldn't be computed
-        # (nonstandard residues, missing atoms). Mask those to 0 and let the model
-        # learn from the surrounding context.
-        has_rel = np.asarray(record["sasa_hasRelativeAreas"], dtype=bool)
-        rel_sc = np.where(has_rel, np.nan_to_num(rel_sc, nan=0.0), 0.0)
         rel_polar = np.where(has_rel, np.nan_to_num(rel_polar, nan=0.0), 0.0)
         rel_apolar = np.where(has_rel, np.nan_to_num(rel_apolar, nan=0.0), 0.0)
+        rel_total = np.where(has_rel, np.nan_to_num(rel_total, nan=0.0), 0.0)
 
-        # --- Mean PAE to 3D neighbors (L,) ---
-        pae = np.asarray(record["pae"], dtype=np.float32)
-        ca_coords = record["structure"][:, 1, :]
-        pae_neighbor = self._mean_pae_to_3d_neighbors(pae, ca_coords, k=10)
-        # PAE is in Å (typically 0-30+). Normalize to roughly [0, 1] for stability.
-        pae_neighbor = np.clip(pae_neighbor / 30.0, 0.0, 1.0)
-
-        # --- Stack and align to seq_len ---
-        feats = np.stack([plddt, rel_sc, rel_polar, rel_apolar, pae_neighbor], axis=1)
-        feats = feats.astype(np.float32)
-
-        # Length safety: pad or truncate to seq_len in case of off-by-one mismatches
-        L = feats.shape[0]
-        if L == seq_len:
-            return feats
-        if L > seq_len:
-            return feats[:seq_len]
-        padded = np.zeros((seq_len, extra_dim), dtype=np.float32)
-        padded[:L] = feats
-        return padded
+        feats = np.stack([plddt, rel_total, extra, rel_polar, rel_apolar], axis=1).astype(np.float32)
+        return feats
 
     @staticmethod
     def _mean_pae_to_3d_neighbors(
@@ -267,6 +242,7 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         representation: RepresentationMode = "embeddings",
         hidden_layers: int | list[int] | tuple[int, ...] | None = None,
         include_structure: bool = False,
+        include_embedding=True,
         esm3_model_name: str | None = None,
     ):
         super().__init__(
@@ -288,6 +264,8 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.representation = representation
         self.hidden_layers = self._normalize_hidden_layers(hidden_layers)
+        self.gen_type = gen_type
+        self.include_embedding = include_embedding
 
         self.file_path, self.storage = self._resolve_storage_path(
             gen_type='local',
@@ -345,29 +323,28 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         if len(self.ids) == 0:
             raise ValueError("No rows left after filtering by embedding availability.")
 
-        self.embed_dim = int(self._get_embedding(self.ids[0]).shape[-1])
+        self.embed_dim = [int(e.shape[-1]) for e in self._get_embedding(self.ids[0])]
 
     def __len__(self):
         return len(self.data)
 
-    def _get_embedding(self, seq_id: str) -> np.ndarray:
-        emb_record = self.store.read(seq_id)
-        emb = self._build_representation(emb_record).astype(np.float32, copy=False)
+    def _get_embedding(self, seq_id: str) -> list:
+        feats = []
+        if self.include_embedding:
+            emb_record = self.store.read(seq_id)
+            emb = self._build_representation(emb_record).astype(np.float32, copy=False)
+            feats.append(emb)
         if self.include_structure:
-            structure_record = self._esm3_feature_vector(seq_id, seq_len=emb.shape[0])
-            if structure_record.shape[0] != emb.shape[0]:
-                """min_len = min(structure_record.shape[0], emb.shape[0])
-                emb = emb[:min_len]
-                structure_record = structure_record[:min_len]"""
-                raise ValueError("ESM3 records have a different length than ESMC embeddings.")
-            emb = np.concatenate([emb, structure_record], axis=-1)
-        return emb
+            structure_record = self._esm3_feature_vector(seq_id)
+            feats.append(structure_record)
+        #feats = np.concatenate(feats
+        return feats
 
     def __getitem__(self, idx):
         seq_id = self.ids[idx]
         emb_np = self._get_embedding(seq_id)
-        emb = torch.from_numpy(emb_np)
-        y = self._build_token_labels(self.labels[idx], emb.shape[0])
+        emb = [torch.from_numpy(e) for e in emb_np]
+        y = self._build_token_labels(self.labels[idx], emb[0].shape[0])
         return emb, y
 
     def close(self):
@@ -402,6 +379,19 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         plt.ylabel("Dim")
         plt.title(f"Protein {idx}")
         plt.show()
+
+    def plot(self, i):
+        data = self[i]
+        import matplotlib.pyplot as plt
+        x, y = data
+        L, F = x.shape
+        fig, axs = plt.subplots(nrows=F)
+        for j in range(F):
+            axs[j].scatter(np.arange(L), x[:,j], c=y, cmap='bwr', s=10)
+            if j == 0:
+                axs[j].set_title(f"Protein {i}")
+
+
 
 
 class ESMLMDBDataset(ESMCSingleDS):
@@ -489,7 +479,7 @@ class ESMCPairDS(MultiSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixi
     def _get_pair_features(self, seq_id: str) -> np.ndarray:
         emb = self._build_representation(self.store.read(seq_id)).astype(np.float32, copy=False)
         if self.include_structure or self.include_sasa:
-            extras = self._esm3_feature_vector(seq_id, seq_len=emb.shape[0])
+            extras = self._esm3_feature_vector(seq_id)
             if extras.shape[0] != emb.shape[0]:
                 min_len = min(extras.shape[0], emb.shape[0])
                 emb = emb[:min_len]
