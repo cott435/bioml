@@ -37,7 +37,7 @@ params = {'max_tokens': 60000, 'hidden_dim': 128, 'layers':3, 'max_norm': 0.5, '
           'base_lr': 1e-3, 'inp_dropout':0.4,
           'loss_selection': 'dice_bce',
           'block_type': 'ConvNeXt1DBlock',
-          'inp_intermediate_dim': 512, 'in_proj_norm': True, 'inp_activation': 'gelu',
+          'in_proj_norm': True, 'inp_activation': 'gelu',
 }
 
 ss = GridSearch(pipeline, params, 'dice_bce', base_save_dir=results_dir)

@@ -1,6 +1,7 @@
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 import torch
+from tensordict import TensorDict
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
@@ -109,8 +110,9 @@ class TokenTrainer:
         loop = tqdm(self.train_loader, desc="Training", position=1, leave=False)
         for batch in loop:
             self.optimizer.zero_grad()
-            if hasattr(self.model.inp_norm, 'set_batch_stats'):
-                self.model.inp_norm.set_batch_stats(batch)
+            inp_norm = getattr(self.model, 'inp_norm', None)
+            if inp_norm is not None and hasattr(inp_norm, 'set_batch_stats'):
+                inp_norm.set_batch_stats(batch)
             loss = self._accumulate_grads(batch) if accumulate else self._get_grads(batch)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
             self.optimizer.step()
@@ -122,10 +124,23 @@ class TokenTrainer:
         return total_loss / len(self.train_loader)
 
 
+    def _apply_jitter(self, embeds):
+        if not self.jitter:
+            return embeds
+        if isinstance(embeds, TensorDict):
+            embeds = embeds.clone()
+            if "embeddings" in embeds.keys():
+                e = embeds["embeddings"]
+                embeds["embeddings"] = e + torch.randn_like(e) * self.jitter
+            return embeds
+        return embeds + torch.randn_like(embeds) * self.jitter
+
     def _get_grads(self, batch):
-        embeds, labels, mask = (t.to(self.device) for t in batch)
-        noise = torch.randn_like(embeds) * self.jitter
-        embeds = embeds + noise
+        embeds, labels, mask = batch
+        embeds = embeds.to(self.device)
+        labels = labels.to(self.device)
+        mask = mask.to(self.device)
+        embeds = self._apply_jitter(embeds)
         logits_full = self.model(embeds, mask=mask)
         loss = self.criterion(logits_full, labels, mask=mask)
         loss = loss.sum() / mask.sum()
@@ -134,12 +149,12 @@ class TokenTrainer:
 
     def _accumulate_grads(self, batch):
         accumulated_loss = 0
-        total_valid_tokens = sum([s[2].sum().item() for s in batch])
         total_b = sum([len(s[1]) for s in batch])
         for embeds, targets, mask in batch:
-            embeds, targets, mask = embeds.to(self.device), targets.to(self.device), mask.to(self.device)
-            noise = torch.randn_like(embeds) * self.jitter
-            embeds = embeds + noise
+            embeds = embeds.to(self.device)
+            targets = targets.to(self.device)
+            mask = mask.to(self.device)
+            embeds = self._apply_jitter(embeds)
             logits = self.model(embeds, mask=mask)
             loss = self.criterion(logits, targets, mask=mask)
             seq_loss = loss.sum() / total_b
@@ -186,8 +201,11 @@ class TokenTrainer:
         all_labels, all_logits, all_losses = [], [], []
 
         def iter_batch(batch):
-            if isinstance(batch[0], torch.Tensor):
-                embeds, labels, mask = (b.to(device) for b in batch)
+            if isinstance(batch[0], (torch.Tensor, TensorDict)):
+                embeds, labels, mask = batch
+                embeds = embeds.to(device)
+                labels = labels.to(device)
+                mask = mask.to(device)
 
                 logits = model(embeds, mask=mask)
                 loss = criterion(logits, labels, mask)

@@ -1,10 +1,10 @@
 import torch
 from pathlib import Path
-from data import ESMCSingleDS
+from data import ESMSingleDS
 from data.utils import pad_collate_fn
 from models.crf import LinearChainCRF
 from training import OptunaSearch, TrainingPipeline, TokenTrainer, SinglePipeline, GridSearch
-from models import TokenActivationHead, TokenActivationLSTM
+from models import TokenActivationHead
 from data import SequenceProcessingPipeline
 
 
@@ -26,7 +26,7 @@ dataset = pipe.build_training_dataset(
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
 results_dir = Path.cwd().parents[0] / 'experiments' / 'lstm'
 
-pipeline = SinglePipeline(dataset, TokenActivationLSTM, TokenTrainer, results_dir, device=device, epochs=20,
+pipeline = SinglePipeline(dataset, TokenActivationHead, TokenTrainer, results_dir, device=device, epochs=20,
                           small_batch=100, stop_overfit=False)
 
 params = {'max_tokens': 60000, 'hidden_dim': 128, 'layers':3, 'max_norm': 5.5, 'inp_norm': 'instance',

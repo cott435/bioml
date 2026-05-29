@@ -182,20 +182,32 @@ def esm_extract_sequences(
         cmd.extend(["--repr_layers", *map(str, repr_layers)])
     subprocess.run(cmd, check=True)
 
+def _pad_tensordict(xs):
+    """Pad a tuple of per-sample TensorDicts (batch_size=[T_i]) into one (B, T_max)."""
+    keys = list(xs[0].keys())
+    padded = {
+        k: pad_sequence([x[k] for x in xs], batch_first=True, padding_value=0.0)
+        for k in keys
+    }
+    B = len(xs)
+    T = padded[keys[0]].shape[1]
+    return TensorDict(padded, batch_size=[B, T])
+
+
 def pad_collate_fn(batch):
     """
     batch: List of (x, y)
-        x: Tensor[T, ...]
+        x: TensorDict with batch_size=[T] (per-residue features)
         y: Tensor[T] or Tensor[T, ...]
     """
     xs, ys = zip(*batch)
-    lengths = torch.tensor([x.shape[0] for x in xs], dtype=torch.long)
+    lengths = torch.tensor([y.shape[0] for y in ys], dtype=torch.long)
 
-    x_padded = pad_sequence(xs, batch_first=True)
+    x_padded = _pad_tensordict(xs)
     y_padded = pad_sequence(ys, batch_first=True)
 
     mask = torch.arange(
-        x_padded.size(1),
+        x_padded.batch_size[1],
         device=lengths.device
     )[None, :] < lengths[:, None]
 
@@ -206,7 +218,7 @@ def bucket_collate_fn(batch, rel_thresh=0.15):
     """
     sort greedily within given percent
     """
-    sorted_batch = sorted(batch, key=lambda x: len(x[1]))
+    sorted_batch = sorted(batch, key=lambda item: item[1].shape[0])
     lengths = torch.tensor([y.shape[0] for _, y in sorted_batch], dtype=torch.long)
 
     sub_batches = []
@@ -217,16 +229,15 @@ def bucket_collate_fn(batch, rel_thresh=0.15):
 
         # Add sequences that are within threshold of current max
         while i < len(lengths) and lengths[i] <= current_len * (1 + rel_thresh):
-            x, y = sorted_batch[i]
-            group_items.append((x, y))
+            group_items.append(sorted_batch[i])
             i += 1
 
         if not group_items:
             break
 
         xs, ys = zip(*group_items)
-        x_padded = pad_sequence(xs, batch_first=True, padding_value=0.0)
-        y_padded = pad_sequence(ys, batch_first=True, padding_value=0.0)  # adjust value if needed
+        x_padded = _pad_tensordict(xs)
+        y_padded = pad_sequence(ys, batch_first=True, padding_value=0.0)
 
         lengths_tensor = torch.tensor([y.shape[0] for y in ys], dtype=torch.long)
         max_len = y_padded.shape[1]

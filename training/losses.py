@@ -28,65 +28,47 @@ class LossBuilder:
         filtered = {k: v for k, v in params.items() if k in valid}
         return loss_cls(**filtered)
 
-@LossBuilder.register('dice_bce')
-class DiceBCELoss(nn.Module):
-    def __init__(self, reduction='mean', pos_weight=None, probs_weight=None):
+class _LossReduction:
+
+    def __init__(self, reduction='class_mean'):
         super().__init__()
-        self.bce = BCELoss(reduction=reduction, pos_weight=pos_weight)
-        self.dice = DiceLoss(probs_weight=probs_weight)
-
-    def forward(self, logits, targets, mask=None):
-        bce_loss = self.bce(logits, targets, mask=mask)
-        dice_loss = self.dice(logits, targets, mask=mask)
-        return bce_loss + dice_loss
-
-@LossBuilder.register('dice_focal')
-class DiceFocalLoss(nn.Module):
-    def __init__(self, gamma=2, alpha=0.25, probs_weight=None):
-        super().__init__()
-        self.focal = FocalLoss(gamma=gamma, alpha=alpha)
-        self.dice = DiceLoss(probs_weight=probs_weight)
-
-    def forward(self, logits, targets, mask=None):
-        focal_loss = self.focal(logits, targets, mask=mask)
-        dice_loss = self.dice(logits, targets, mask=mask)
-        return focal_loss + dice_loss
-
-@LossBuilder.register('bce')
-class BCELoss(nn.Module):
-
-    def __init__(self, reduction='split_mean', pos_weight=None):
-        super().__init__()
-        pos_weight = torch.tensor(pos_weight) if pos_weight is not None else None
-        self.bce = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pos_weight)
         self.reduction = reduction
 
-    def forward(self, logits, targets, mask=None):
-        bce_loss = self.bce(logits, targets)
-        loss = bce_loss * mask if mask is not None else bce_loss
-
+    def reduce(self, loss, targets, mask=None):
+        mask = mask.to(torch.bool) if mask is not None else torch.ones_like(targets, dtype=torch.bool)
         if self.reduction == 'mean':
-            return loss.mean() if mask is None else loss.sum(-1) / mask.sum(-1)
+            return loss.sum(-1) / mask.sum(-1)
         elif self.reduction == 'targets':
-            return loss.sum() if mask is None else torch.mean(loss.sum(-1) / targets.sum(-1))
+            return torch.mean(loss.sum(-1) / targets.sum(-1))
         elif self.reduction == 'sum':
             return loss.sum()
-        elif self.reduction == 'split_mean':
-            mask = torch.ones_like(targets) if mask is None else mask
+        elif self.reduction == 'class_mean':
             pos_mask = (targets > 0.5) & mask
             neg_mask = (targets < 0.5) & mask
             pos_loss_mean = (loss * pos_mask).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
             neg_loss_mean = (loss * neg_mask).sum(dim=1) / (neg_mask.sum(dim=1) + 1e-8)
-            loss = 0.5 * (pos_loss_mean + neg_loss_mean)
+            return 0.5 * (pos_loss_mean + neg_loss_mean)
         return loss
+
+@LossBuilder.register('bce')
+class BCELoss(_LossReduction, nn.Module):
+
+    def __init__(self, reduction='class_mean', pos_weight=None):
+        super().__init__(reduction=reduction)
+        pos_weight = torch.tensor(pos_weight) if pos_weight is not None else None
+        self.bce = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pos_weight)
+
+    def forward(self, logits, targets, mask=None):
+        bce_loss = self.bce(logits, targets)
+        loss = bce_loss * mask if mask is not None else bce_loss
+        return self.reduce(loss, targets, mask=mask)
 
 @LossBuilder.register('dice')
 class DiceLoss(nn.Module):
 
-    def __init__(self, smooth=1e-6, probs_weight=None):
+    def __init__(self, smooth=1e-3):
         super().__init__()
         self.smooth = smooth
-        self.probs_weight = probs_weight
 
     def forward(self, logits, targets, mask=None):
         probs = torch.sigmoid(logits)
@@ -96,17 +78,15 @@ class DiceLoss(nn.Module):
         total = probs.sum(dim=-1) + targets.sum(dim=-1)
 
         dice = (2 * intersection + self.smooth) / (total + self.smooth)
-        probs_loss = (probs * (targets < 0.1)).sum(-1) * self.probs_weight if self.probs_weight is not None else 0
-        return (1 - dice) + probs_loss
+        return 1 - dice
 
 @LossBuilder.register('focal')
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='split_mean', smoothing=False):
-        super().__init__()
+class FocalLoss(_LossReduction, nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='class_mean', smoothing=False):
+        super().__init__(reduction=reduction)
         self.alpha = alpha
         self.gamma = gamma
         self.alpha = alpha
-        self.reduction = reduction
         self.smoothing = smoothing
 
     def forward(self, logits, targets, mask=None):
@@ -124,35 +104,31 @@ class FocalLoss(nn.Module):
             alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss
         loss = loss * mask if mask is not None else loss
+        return self.reduce(loss, targets, mask=mask)
 
-        if self.reduction == 'mean':
-            return loss.mean() if mask is None else loss.sum() / mask.sum()
-        elif self.reduction == 'targets':
-            return loss.sum() if mask is None else torch.mean(loss.sum(-1) / targets.sum(-1))
-        elif self.reduction == 'split_mean':
-            mask = torch.ones_like(targets).to(torch.bool) if mask is None else mask
-            pos_mask = (targets > 0.5) & mask
-            neg_mask = (targets < 0.5) & mask
-            pos_loss_mean = (loss * pos_mask).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
-            neg_loss_mean = (loss * neg_mask).sum(dim=1) / (neg_mask.sum(dim=1) + 1e-8)
-            loss = 0.5 * (pos_loss_mean + neg_loss_mean)
-        return loss
+@LossBuilder.register('dice_bce')
+class DiceBCELoss(nn.Module):
+    def __init__(self, reduction='class_mean', pos_weight=None):
+        super().__init__()
+        self.bce = BCELoss(reduction=reduction, pos_weight=pos_weight)
+        self.dice = DiceLoss()
 
+    def forward(self, logits, targets, mask=None):
+        bce_loss = self.bce(logits, targets, mask=mask)
+        dice_loss = self.dice(logits, targets, mask=mask)
+        return bce_loss + dice_loss
 
-    @staticmethod
-    def reduce_loss(loss, targets, mask, reduce=True):
-        pos_mask = targets * mask
-        neg_mask = (1 - targets) * mask
-        pos_loss_sum = (loss * pos_mask).sum(dim=-1)
-        neg_loss_sum = (loss * neg_mask).sum(dim=-1)
-        pos_count = pos_mask.sum(dim=-1) + 1e-8
-        neg_count = neg_mask.sum(dim=-1) + 1e-8
-        pos_avg = pos_loss_sum / pos_count
-        neg_avg = neg_loss_sum / neg_count
-        if reduce:
-            return pos_avg + neg_avg
-        else:
-            return pos_avg, neg_avg
+@LossBuilder.register('dice_focal')
+class DiceFocalLoss(nn.Module):
+    def __init__(self, gamma=2, alpha=0.25, reduction='class_mean'):
+        super().__init__()
+        self.focal = FocalLoss(gamma=gamma, alpha=alpha, reduction=reduction)
+        self.dice = DiceLoss()
+
+    def forward(self, logits, targets, mask=None):
+        focal_loss = self.focal(logits, targets, mask=mask)
+        dice_loss = self.dice(logits, targets, mask=mask)
+        return focal_loss + dice_loss
 
 @LossBuilder.register('dynamic_focal')
 class DynamicFocalLoss(FocalLoss):
@@ -199,4 +175,19 @@ class DynamicFocalLoss(FocalLoss):
     def get_current_params(self):
         """Helper to log parameters during training."""
         return {'alpha': self.alpha, 'gamma': self.gamma}
+
+
+if __name__ == "__main__":
+    pred1 = torch.randn(1, 100) / 10 - 3.6
+    targ1 = torch.zeros(1, 100)
+    targ1[:, 10:25] = 1
+
+    dice = DiceLoss()
+    focal = FocalLoss()
+    bce = BCELoss()
+
+    d = dice(pred1, targ1)
+    f = focal(pred1, targ1)
+    b = bce(pred1, targ1)
+
 

@@ -24,15 +24,15 @@ class TokenOptimizer:
         self.out_lr_ratio = out_lr_ratio
         self.base_lr = base_lr
 
-        param_groups = [
+        """param_groups = [
             {"params": model.stack.parameters(), "lr": base_lr},
             {"params": model.in_proj.parameters(), "lr": base_lr * in_lr_ratio},
             {"params": model.out_proj.parameters(), "lr": base_lr * out_lr_ratio},
         ]
         if model.inp_norm is not None:
-            param_groups.append({"params": model.inp_norm.parameters(), "lr": base_lr})
+            param_groups.append({"params": model.inp_norm.parameters(), "lr": base_lr})"""
 
-        self.optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+        self.optimizer = torch.optim.AdamW(model.parameters(), weight_decay=weight_decay)
 
         self.scheduler = get_cosine_scheduler(
             self.optimizer,

@@ -6,6 +6,7 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from tensordict import TensorDict
 from tqdm.auto import tqdm
 
 from .embedding_store import (
@@ -224,7 +225,7 @@ class _EmbeddingReaderMixin:
         return torch.full((seq_len,), float(target), dtype=torch.float32)
 
 
-class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixin):
+class ESMSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderMixin):
     def __init__(
         self,
         data_name,
@@ -323,29 +324,31 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         if len(self.ids) == 0:
             raise ValueError("No rows left after filtering by embedding availability.")
 
-        self.embed_dim = [int(e.shape[-1]) for e in self._get_embedding(self.ids[0])]
+        sample_feats = self._get_embedding(self.ids[0])
+        self.feature_keys = list(sample_feats.keys())
+        self.embed_dim = {k: int(v.shape[-1]) for k, v in sample_feats.items()}
 
     def __len__(self):
         return len(self.data)
 
-    def _get_embedding(self, seq_id: str) -> list:
-        feats = []
+    def _get_embedding(self, seq_id: str) -> dict:
+        feats = {}
         if self.include_embedding:
             emb_record = self.store.read(seq_id)
             emb = self._build_representation(emb_record).astype(np.float32, copy=False)
-            feats.append(emb)
+            feats["embeddings"] = emb
         if self.include_structure:
-            structure_record = self._esm3_feature_vector(seq_id)
-            feats.append(structure_record)
-        #feats = np.concatenate(feats
+            feats["structure"] = self._esm3_feature_vector(seq_id)
         return feats
 
     def __getitem__(self, idx):
         seq_id = self.ids[idx]
-        emb_np = self._get_embedding(seq_id)
-        emb = [torch.from_numpy(e) for e in emb_np]
-        y = self._build_token_labels(self.labels[idx], emb[0].shape[0])
-        return emb, y
+        feats_np = self._get_embedding(seq_id)
+        tensors = {k: torch.from_numpy(v) for k, v in feats_np.items()}
+        seq_len = next(iter(tensors.values())).shape[0]
+        x = TensorDict(tensors, batch_size=[seq_len])
+        y = self._build_token_labels(self.labels[idx], seq_len)
+        return x, y
 
     def close(self):
         if getattr(self, "store", None) is not None:
@@ -369,9 +372,9 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
 
     def heatmap(self, idx: int | list[int]):
         if isinstance(idx, list):
-            emb = np.concatenate([self[i][0].numpy() for i in idx], axis=0).T
+            emb = np.concatenate([self[i][0]["embeddings"].numpy() for i in idx], axis=0).T
         else:
-            emb = self[idx][0].numpy().T
+            emb = self[idx][0]["embeddings"].numpy().T
         plt.figure()
         plt.imshow(emb, aspect="auto", cmap="viridis")
         plt.colorbar(label="Value")
@@ -381,20 +384,19 @@ class ESMCSingleDS(SingleSequenceDS, torch.utils.data.Dataset, _EmbeddingReaderM
         plt.show()
 
     def plot(self, i):
-        data = self[i]
-        import matplotlib.pyplot as plt
-        x, y = data
-        L, F = x.shape
+        x, y = self[i]
+        emb = x["embeddings"].numpy()
+        L, F = emb.shape
         fig, axs = plt.subplots(nrows=F)
         for j in range(F):
-            axs[j].scatter(np.arange(L), x[:,j], c=y, cmap='bwr', s=10)
+            axs[j].scatter(np.arange(L), emb[:, j], c=y, cmap='bwr', s=10)
             if j == 0:
                 axs[j].set_title(f"Protein {i}")
 
 
 
 
-class ESMLMDBDataset(ESMCSingleDS):
+class ESMLMDBDataset(ESMSingleDS):
     def __init__(self, *args, **kwargs):
         kwargs["storage"] = "lmdb"
         super().__init__(*args, **kwargs)

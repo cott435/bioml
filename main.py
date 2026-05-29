@@ -1,5 +1,5 @@
 from pathlib import Path
-from data import ESMCSingleDS
+from data import ESMSingleDS
 from models import TokenActivationHead
 import torch
 from training import OptunaSearch, TrainingPipeline, TokenTrainer
@@ -12,7 +12,7 @@ base_data_dir = Path.cwd() / 'data' / 'data_files'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
 
-dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+dataset=ESMSingleDS(data_name, model_name, save_dir=base_data_dir)
 
 
 results_dir = Path.cwd() / 'experiments'

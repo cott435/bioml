@@ -1,5 +1,5 @@
 from pathlib import Path
-from data import ESMCSingleDS
+from data import ESMSingleDS
 from ml.datasets import ESMCTokenFrameBuilder
 from ml.pipeline import MLBaselinePipeline, default_model_specs
 from ml.splits import GroupKFoldSplitStrategy, SingleGroupSplitStrategy

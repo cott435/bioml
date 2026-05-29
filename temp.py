@@ -461,14 +461,14 @@ if __name__ == "__main__":
 
 from testing.analyze import ProteinEmbeddingAnalyzer
 from pathlib import Path
-from data import ESMCSingleDS
+from data import ESMSingleDS
 from testing.plotting import ESMPlotter
 
 data_name = 'IEDB_Jespersen'
 model_name = 'esmc_300m'
 base_data_dir = Path.cwd() / 'data' / 'data_files'
 
-dataset=ESMCSingleDS(data_name, model_name, save_dir=base_data_dir)
+dataset=ESMSingleDS(data_name, model_name, save_dir=base_data_dir)
 
 smoothed_plotter = ESMPlotter(dataset, 3000, smoothing_window=5)
 plotter = ESMPlotter(dataset, 3000)

@@ -22,7 +22,7 @@ The default embedding storage is **LMDB**. Optional storage is **H5**.
   - `LMDBEmbeddingStore`
   - `H5EmbeddingStore`
 - `data/datasets.py`
-  - `ESMCSingleDS`
+  - `ESMSingleDS`
   - `ESMLMDBDataset`
   - `PackedSequenceDataset`
   - `ESMCPairDS`
@@ -91,7 +91,7 @@ train_ds = pipe.build_training_dataset(
 )
 ```
 
-`ESMCSingleDS.__getitem__` returns:
+`ESMSingleDS.__getitem__` returns:
 
 - `emb`: shape `[seq_len, embed_dim or expanded_dim]`
 - `y`: shape `[seq_len]`
@@ -159,7 +159,7 @@ During loading:
 
 Legacy imports still work:
 
-- `ESMCSingleDS`
+- `ESMSingleDS`
 - `ESMLMDBDataset`
 - `PackedSequenceDataset`
 - `SingleSequenceDS`

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .datasets import ESMCPairDS, ESMCSingleDS
+from .datasets import ESMCPairDS, ESMSingleDS
 from .embed import (
     ESM3ForgeGenerator,
     ESM3LocalGenerator,
@@ -171,7 +171,7 @@ class SequenceProcessingPipeline:
     ):
         esm3_name = esm3_model_name if include_structure else None
         if self.sequence_kind == "single":
-            return ESMCSingleDS(
+            return ESMSingleDS(
                 self.data_name,
                 self.model_name,
                 gen_type='forge',
